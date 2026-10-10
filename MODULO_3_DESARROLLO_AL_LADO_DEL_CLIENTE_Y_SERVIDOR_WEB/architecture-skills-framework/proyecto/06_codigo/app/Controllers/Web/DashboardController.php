@@ -20,7 +20,7 @@ final class DashboardController
         }
         header('Content-Type: text/html; charset=utf-8');
         View::render('dashboard/index', [
-            'pageTitle' => 'Dashboard',
+            'pageTitle' => 'Centro de Control | S3IH',
             'userName' => $user['nombre'],
         ], 'layouts/main');
     }

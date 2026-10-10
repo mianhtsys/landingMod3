@@ -81,3 +81,165 @@ tr:last-child td { border-bottom: none; }
 .row-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 .btn-sm { padding: 2px var(--space-2); font-size: .85rem; }
 td .btn + .btn { margin-left: var(--space-2); }
+
+/* Workflow 08: Badges de Prioridad Asistencial y Soporte Vital */
+.badge-vital { background: #fee2e2; color: #b91c1c; font-weight: 700; border: 1px solid #f87171; text-transform: uppercase; }
+.badge-alta { background: #ffedd5; color: #c2410c; font-weight: 600; }
+.badge-media { background: #e0f2fe; color: #0284c7; }
+.badge-baja { background: #f3f4f6; color: #4b5563; }
+.badge-expedita { background: #e11d48; color: #ffffff; font-weight: 700; letter-spacing: 0.5px; }
+
+/* Banner Zero-PHI (RNF-035) */
+.banner-zero-phi {
+  background: #fef3c7;
+  border-left: 4px solid #f59e0b;
+  color: #92400e;
+  padding: var(--space-3);
+  border-radius: var(--radius);
+  margin-bottom: var(--space-3);
+  font-size: .88rem;
+  line-height: 1.4;
+}
+.banner-zero-phi strong { display: block; margin-bottom: 4px; color: #78350f; }
+
+/* Selector de modo dual (Estándar vs Expedita) */
+.mode-switch {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  background: var(--color-bg);
+  padding: 4px;
+  border-radius: var(--radius);
+}
+.mode-btn {
+  flex: 1;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: var(--radius);
+  font-weight: 500;
+  color: var(--color-muted);
+  transition: all .15s ease;
+}
+.mode-btn.active {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.mode-btn.active.expedita-active {
+  background: #e11d48;
+  color: #fff;
+  font-weight: 700;
+}
+
+/* Filtros de bandeja */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  align-items: center;
+}
+.filter-bar select, .filter-bar input {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: .9rem;
+}
+.form-section-wide { max-width: 680px; }
+
+/* Workflow 08 (CP-SOL-06): Detalle de Orden, Timeline y Transiciones */
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.detail-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+.detail-card h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 1rem;
+  color: var(--color-text);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 6px;
+}
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: .9rem;
+}
+.detail-label { color: var(--color-muted); font-weight: 500; }
+.detail-value { font-weight: 600; text-align: right; }
+
+/* Panel de Transiciones Contextuales */
+.transition-panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.transition-buttons {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+.transition-box {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* Timeline / Pista de Auditoría (RN-012/RN-013) */
+.timeline {
+  position: relative;
+  padding-left: 24px;
+  margin-top: var(--space-3);
+  border-left: 2px solid var(--color-border);
+}
+.timeline-item {
+  position: relative;
+  margin-bottom: var(--space-3);
+}
+.timeline-item:last-child { margin-bottom: 0; }
+.timeline-dot {
+  position: absolute;
+  left: -31px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 2px solid var(--color-surface);
+}
+.timeline-content {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: .9rem;
+}
+.timeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.timeline-title { font-weight: 600; }
+.timeline-date { color: var(--color-muted); font-size: .8rem; }
+.timeline-meta { color: var(--color-muted); font-size: .82rem; margin-top: 4px; }
+.timeline-reason { margin-top: 6px; padding: 6px 10px; background: var(--color-bg); border-radius: var(--radius); font-style: italic; }
+

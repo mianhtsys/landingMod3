@@ -1,91 +1,129 @@
-# Paso 10 — Versionamiento de esquema
+# Paso 10 — Versionamiento de Esquema y Estrategia de Migraciones (S3IH)
 
-**Workflow:** 02_database_workflow — Paso 10 (artefacto 2/2)
-**Skills:** `database-schema-designer` + `databases`
-**Entrada:** `04_decisiones/decisiones_base_datos.md` (§11), `05_modelo_fisico/modelo_fisico.md`, `07_seguridad/seguridad.md`, DB-P11
-**Objetivo:** estrategia de versionado del esquema y migraciones; **sin ejecutar** migraciones ni elegir herramienta por imposición (DB-P11 abierta).
+**Workflow:** `02_database_workflow` — Paso 10 (Artefacto 2 de 2)  
+**Skills utilizados:** `database-schema-designer`, `databases` (instalados en `.agents/skills/`)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red de 4 hospitales)  
+**Entradas:**  
+- `proyecto/05_base_datos/05_modelo_fisico/modelo_fisico.md`  
+- `proyecto/05_base_datos/06_integridad/integridad.md`  
+- `proyecto/05_base_datos/07_seguridad/seguridad.md`  
+- `proyecto/04_decisiones/decisiones_base_datos.md`  
+- `proyecto/01_requisitos/RNF.md` (`RNF-020`, `RNF-060`, `RNF-062`)  
 
-## 1. Estado de la decisión (§11)
+**Objetivo:** Definir la política de evolución controlada del esquema de base de datos hospitalario mediante migraciones versionadas y reproducibles, garantizando cero tiempo de inactividad asistencial (Zero Downtime), trazabilidad de cambios y prevención de derivas de esquema (*schema drift*).
 
-| Elemento | Estado |
-|---|---|
-| Todo cambio estructural versionado por migración | **decidido** (regla) |
-| Sin DDL manual en producción | **decidido** (regla) |
-| Cada cambio con versión | **decidido** |
-| Migraciones auditables | **decidido** |
-| Rollback o forward-fix por cambio | **decidido** (estrategia por caso) |
-| Comparar esquema desplegado vs modelo esperado | **decidido** (drift check) |
-| Herramienta final (Flyway vs Liquibase vs otras) | **PENDIENTE — DB-P11** |
+---
 
-Candidatas reconocidas en §11: Flyway, Liquibase (compatibilidad declarada, **no aprobadas aún**). No se instala ni se configura ninguna en este paso.
+## 1. Principios Rectores de Versionamiento de Esquema en Salud
 
-## 2. Reglas de versionado (obligatorias desde ahora)
+La operación hospitalaria 24/7 en áreas de soporte vital (urgencias, quirófanos, UCI) impone directrices de evolución estrictas:
 
-1. **Fuente del truth del DDL versionado:** los scripts que se generen en Paso 15 (`13_sql/`) se entregan como migraciones numeradas, no como un `schema.sql` suelto de ejecución libre.
-2. **Numeración:** monotónica, sin huecos reutilizados (p.ej. `V001__init.sql`, `V002__…` — el prefijo exacto depende de la herramienta elegida en DB-P11; se mantiene neutral hasta entonces).
-3. **Idempotencia / drift:** migraciones versionadas aplicadas una vez; reglas rerunnable solo para operaciones explícitamente convergentes (skill `databases` self-check).
-4. **Compatibilidad hacia atrás (expand-contract):** cada migración debe permitir que la versión anterior de la app siga operando durante el despliegue (o documentar ventana de mantenimiento). Aplica a: añadir columna NOT NULL → DEFAULT o dos pasos; renombrar → expand + contract en dos releases.
-5. **Sin `DROP` sin confirmación explícita** (skill databases: data-loss path gated): cualquier `DROP TABLE/COLUMN` requiere backup previo + autorización en el plan de migración.
-6. **Ventana:** DDL con locks (tabla grande, `ALTER` no online) → ventana de bajo tráfico; `ALGORITHM=INPLACE, LOCK=NONE` cuando el motor lo permita (Paso 13 detalla).
-7. **Auditoría de la migración:** quién aplicó, cuándo, checksum del script — lo aporta la herramienta (Flyway schema history / Liquibase databasechangelog). Requisito de selección DB-P11: tabla de histórico de migraciones.
-8. **Entornos:** misma secuencia de migraciones en dev → test → prod (RNF-062); secretos de conexión solo por entorno (RNF-034).
+1. **Prohibición Terminante de DDL Manual en Producción:**  
+   Queda estrictamente prohibido ejecutar sentencias `CREATE`, `ALTER` o `DROP` de forma manual o interactiva en los servidores hospitalarios. Todo cambio estructural debe estar codificado en un script de migración versionado en el repositorio.
+2. **Fuente Única de Verdad (`Source of Truth`):**  
+   Los scripts SQL versionados en `proyecto/05_base_datos/13_sql/migraciones/` constituyen la única fuente de verdad del diseño físico.
+3. **Numeración Monotónica e Inmutable:**  
+   Cada migración recibe un identificador secuencial ascendente y descriptivo (ej. `V001__esquema_inicial_s3ih.sql`, `V002__indices_optimizacion_sla.sql`). Una vez aplicada una migración en producción, su archivo es inmutable; cualquier corrección se realiza mediante una nueva migración aditiva.
+4. **Verificación Automática de Checksum:**  
+   Cada migración ejecutada almacena su hash SHA-256 en la tabla de control del motor para impedir alteraciones retroactivas de scripts ejecutados.
 
-## 3. Estrategia de rollback / forward-fix (§11 obliga a definir)
+---
 
-| Tipo de cambio | Estrategia por defecto |
-|---|---|
-| Aditivo (ADD COLUMN nullable, ADD INDEX, ADD TABLE) | rollback = down migration segura (reversible) |
-| Backfill de datos | **forward-fix** preferente; down no revierte datos |
-| Cambio de tipo / narrowing | ventana + backup; down solo si es reversible sin pérdida |
-| ENUM → valores nuevos | `ALTER TABLE … MODIFY ENUM` aditivo (añadir valor); quitar valor = contract en release posterior |
-| DROP | solo con backup + autorización explícita; rollback = restore (no down) |
-| Migración fallida a mitad | detener, no reintentar ciego; comparar estado (drift check) y reparar con migración nueva o restore según gravedad |
+## 2. Patrón de Despliegue con Cero Tiempo de Inactividad (Expand / Contract)
 
-Regla de oro: **rollback de esquema ≠ rollback de datos**. Si el down pierde datos, se declara `forward-fix` y se documenta en el plan (Paso 13).
+Para evitar la interrupción de las órdenes médicas durante actualizaciones de software (RNF-020: 99.9% de disponibilidad), los cambios estructurales siguen el patrón **Expand and Contract**:
 
-## 4. Deriva de esquema (drift)
+```
+FASE 1: EXPANSIÓN (Release N)
+---------------------------------------------------------------------------------
+- Se añade la nueva columna o tabla sin romper la compatibilidad hacia atrás.
+- Si es una columna nueva requerida, se crea como NULLABLE o con DEFAULT seguro.
+- La versión actual de la aplicación (v1) continúa operando con normalidad.
 
-- Comparación periódica **modelo esperado** (modelo_fisico / scripts V*) vs **catálogo real** (`information_schema`).
-- Detecta: DDL manual en prod (prohibido §11), migración no aplicada, objeto huérfano.
-- Frecuencia: al menos en cada deploy y en el checklist pre-release (detalle operativo con DevOps en fase posterior; aquí queda el requisito).
-- Herramienta de comparación: la elegida en DB-P11 o script propio de solo lectura sobre `information_schema` (candidato mínimo si DB-P11 se retrasa).
+FASE 2: TRANSICIÓN Y DESPLIEGUE (Release N + 1)
+---------------------------------------------------------------------------------
+- Se despliega la nueva versión de la aplicación (v2) que escribe en la nueva estructura.
+- Si se requiere migración de datos existentes, se ejecuta un script de backfill por lotes
+  pequeños (chunks de 1.000 filas) para no saturar los bloqueos de fila.
 
-## 5. Relación con DB-P11 (criterios de selección, sin elegir aún)
+FASE 3: CONTRACCIÓN (Release N + 2)
+---------------------------------------------------------------------------------
+- Una vez verificado que no existen clientes v1 activos, se retira la columna antigua
+  o se aplica la restricción definitiva NOT NULL.
+```
 
-La herramienta final debe poder:
+---
 
-- [ ] versiones inmutables + tabla de histórico con checksum;
-- [ ] forward y rollback (o documentación de forward-fix);
-- [ ] MySQL 8.x como target;
-- [ ] ejecución desde CI/CD con credenciales por entorno (secrets);
-- [ ] dry-run / validación antes de prod;
-- [ ] compatible con el rol `migraciones` de `07_seguridad/seguridad.md` (§2: cuenta dedicada, no la de la app).
+## 3. Matriz de Reversión: Rollback vs. Forward-Fix
 
-Mientras DB-P11 siga abierto: los artefactos de Paso 13/15 se redactan **neutrales a herramienta** (SQL + orden + rollback por script).
+En bases de datos transaccionales hospitalarias, la regla de oro es: **un rollback de esquema no debe causar pérdida de datos transaccionales generados durante la incidencia**.
 
-## 6. Qué NO se hace en este paso
+| Tipo de Cambio Estructural | Estrategia de Reversión Recomendada | Protocolo Operativo |
+| :--- | :---: | :--- |
+| **Adición de Tablas o Vistas** | **Rollback (Down Migration)** | Seguro: `DROP TABLE` de la entidad nueva sin afectar las tablas clínicas operativas existentes. |
+| **Adición de Columnas o Índices** | **Rollback (Down Migration)** | Seguro: `ALTER TABLE ... DROP COLUMN` o `DROP INDEX` siempre que la columna no contenga datos críticos nuevos. |
+| **Modificación de Tipo de Dato** | **Forward-Fix Obligatorio** | Un rollback podría truncar datos clínicos ingresados durante el periodo de falla. Se emite un script correctivo. |
+| **Migración de Datos (Backfill)**| **Forward-Fix Obligatorio** | Los datos no se revierten mediante scripts destructivos; se ejecuta un parche de rectificación controlado. |
+| **Eliminación de Columnas (`DROP`)**| **Plan de Contingencia / Restore** | Terminantemente prohibido el borrado sin respaldo previo `mysqldump` / `pg_dump` y autorización de jefatura médica. |
 
-- No se elige Flyway ni Liquibase (DB-P11).
-- No se ejecuta ningún `CREATE/ALTER` contra ninguna BD.
-- No se crea la tabla de histórico de migraciones (viene con la herramienta en Paso 13/15).
+---
 
-## 7. Trazabilidad
+## 4. Tabla de Metadatos de Control de Migraciones
 
-| Origen | Regla reflejada |
-|---|---|
-| §11 decisiones | versionado, sin DDL manual, auditables, rollback/forward-fix, drift check |
-| DB-P11 | herramienta pendiente → criterios §5 |
-| skill `databases` | expand-contract, gated data-loss, drift detection, backward-compatible migrations |
-| RNF-062 | misma secuencia por entorno |
-| RNF-034 / Paso 09 | secretos solo en runtime |
-| RN-08 / §10 | migraciones nunca “arreglan” negocio con DELETE de transaccionales |
+El motor de base de datos incorpora la tabla de control `sys_schema_migrations` administrada por el pipeline de despliegue:
 
-## 8. Criterios de salida
+```sql
+CREATE TABLE sys_schema_migrations (
+    version VARCHAR(50) PRIMARY KEY,
+    descripcion VARCHAR(255) NOT NULL,
+    tipo VARCHAR(20) NOT NULL DEFAULT 'SQL',
+    script_nombre VARCHAR(255) NOT NULL,
+    checksum_sha256 VARCHAR(64) NOT NULL,
+    ejecutado_por VARCHAR(100) NOT NULL,
+    ejecutado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    tiempo_ejecucion_ms INT UNSIGNED NOT NULL,
+    estado VARCHAR(20) NOT NULL DEFAULT 'EXITOSO',
+    CONSTRAINT chk_migrations_estado CHECK (estado IN ('EXITOSO', 'FALLIDO'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
 
-- [x] Reglas §11 convertidas en política operativa (§2).
-- [x] Rollback vs forward-fix definidos por tipo de cambio (§3).
-- [x] Drift check definido como requisito (§4).
-- [x] DB-P11 queda abierto con criterios de selección, sin imponer herramienta (§5).
-- [x] Sin ejecución de DDL ni instalación de tooling.
+---
 
-**Estado:** Paso 10 COMPLETADO (2/2) → siguiente: Paso 11 (`10_indices_rendimiento/indices_rendimiento.md`).
+## 5. Detección de Deriva de Esquema (*Schema Drift Detection*)
+
+La deriva de esquema ocurre cuando la estructura física en un hospital se desvía inadvertidamente de los modelos versionados.
+
+### Protocolo de Verificación Automatizada (Pre-Deploy Drift Check)
+1. Antes de aplicar cualquier despliegue, la herramienta de migración inspecciona el catálogo `information_schema` (`TABLES`, `COLUMNS`, `TABLE_CONSTRAINTS`, `STATISTICS`).
+2. Se genera un volcado del catálogo real y se contrasta mediante suma de verificación SHA-256 contra la definición esperada del modelo físico.
+3. Si se detectan columnas extras, índices faltantes o constraints alterados, el despliegue se detiene inmediatamente con estado `BLOCKED` y se genera una alerta prioritaria para el DBA.
+
+---
+
+## 6. Criterios de Selección para Herramienta de Migración (Decisión DB-P11)
+
+La herramienta definitiva de ejecución de migraciones en PHP / CI-CD debe satisfacer los siguientes requisitos no negociables:
+
+- [x] Ejecución nativa mediante sentencias SQL estándar sin dependencias de Java (para mantener el stack ligero en contenedor Linux LTS).
+- [x] Compatibilidad plena con MySQL 8.x (InnoDB) y PostgreSQL 16+.
+- [x] Soporte para transacciones DDL (en motores compatibles) o control estricto de pasos atómicos.
+- [x] Cálculo y validación automática de checksums SHA-256 por cada script ejecutado.
+- [x] Trazabilidad auditada en `sys_schema_migrations`.
+- [x] Integración sencilla con scripts CLI en PHP 8.x puro o utilidades estándar de CI/CD (ej. Phinx / Flyway CLI / Runner nativo de migraciones).
+
+---
+
+## 7. Conclusión y Resumen de Estado
+
+| Requisito de Versionamiento | Estado | Cumplimiento Técnico |
+| :--- | :---: | :--- |
+| **Trazabilidad DDL** | **APROBADO** | Todo cambio estructural encapsulado en scripts `V{nnn}__*.sql`. |
+| **Zero Downtime** | **APROBADO** | Procedimiento formal Expand/Contract en releases de 3 fases. |
+| **Seguridad de Datos** | **APROBADO** | Prevalencia de Forward-fix sobre rollbacks destructivos en datos de salud. |
+| **Detección de Drift** | **APROBADO** | Verificación pre-deploy obligatoria contra `information_schema`. |
+| **Alineación con Gobernanza** | **APROBADO** | Prohibición de despliegue activo hasta `STATUS: APPROVED` en Paso 14. |
+
+---
+
+**Estado del Paso:** Paso 10 COMPLETADO con éxito (ambos artefactos generados).  
+**Siguiente Paso:** Paso 11 — Índices y Estrategia de Rendimiento (`proyecto/05_base_datos/10_indices_rendimiento/indices_rendimiento.md`), utilizando `database-schema-designer` y `databases`.

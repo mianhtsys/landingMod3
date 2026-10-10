@@ -1,18 +1,27 @@
 {
-    "workflow":  "06_integration_workflow",
-    "phase":  "integration",
-    "scope":  [
-                  "login",
-                  "categorias",
-                  "productos"
-              ],
-    "current_checkpoint":  "COMPLETED",
-    "technical_status":  "PASSED",
-    "human_status":  "APPROVED",
-    "last_completed":  "CP-INT-05",
-    "blocked":  false,
-    "can_continue":  true,
-    "blocked_by":  [
-
-                   ]
+    "workflow": "06_integration_workflow",
+    "phase": "integration",
+    "scope": [
+        "login",
+        "categorias",
+        "productos"
+    ],
+    "current_checkpoint": "COMPLETED",
+    "technical_status": "PASSED",
+    "human_status": "APPROVED",
+    "last_completed": "CP-INT-05",
+    "blocked": false,
+    "can_continue": true,
+    "evidence": {
+        "suite": "proyecto/06_codigo/tests/test_cp_int_05.php",
+        "results": "132/132 PASSED",
+        "documentation": "proyecto/06_codigo/docs/validacion_final_integracion.md",
+        "summary": {
+            "CP-INT-01": "22/22 PASSED (Login → Dashboard → Logout)",
+            "CP-INT-02": "37/37 PASSED (Categorías: listar → crear → editar → inactivar)",
+            "CP-INT-03": "44/44 PASSED (Productos: listar → crear con categoría → editar → inactivar)",
+            "CP-INT-04": "29/29 PASSED (Seguridad básica: sesión, SQLi, XSS, CSRF, secretos y logs)",
+            "CP-INT-05": "Integración consolidada 100% exitosa y salud de base de datos MySQL validada"
+        }
+    }
 }

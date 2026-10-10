@@ -1,6 +1,6 @@
 <?php /** CP-FRONT-03: listado de categorías */ ?>
-<h1>Categorías</h1>
-<p class="page-sub">Listado de categorías registradas.</p>
+<h1>Categorías de Suministros</h1>
+<p class="page-sub">Catálogo tipificado de insumos, materiales y equipamiento de la red hospitalaria S3IH.</p>
 <p id="cat-error" class="form-error" role="alert" hidden></p>
 <p id="cat-loading" class="page-muted">Cargando categorías…</p>
 <p id="cat-empty" class="page-muted" hidden>No hay categorías registradas.</p>
@@ -24,8 +24,8 @@
   <h2 id="cat-new-title">Nueva categoría</h2>
   <form id="cat-new-form" novalidate>
     <div class="form-field">
-      <label for="cat-nombre">Nombre</label>
-      <input type="text" id="cat-nombre" name="nombre" maxlength="100" required>
+      <label for="cat-nombre">Nombre de la categoría</label>
+      <input type="text" id="cat-nombre" name="nombre" maxlength="100" placeholder="Ej. Instrumental Quirúrgico" required>
     </div>
     <div class="form-field">
       <label for="cat-padre">Categoría padre (opcional)</label>

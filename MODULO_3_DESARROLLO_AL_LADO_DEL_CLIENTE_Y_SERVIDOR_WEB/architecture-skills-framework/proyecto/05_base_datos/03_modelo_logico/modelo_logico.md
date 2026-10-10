@@ -1,194 +1,385 @@
-# Paso 04 — Modelo lógico
+# Paso 04 — Modelo Lógico de Datos
 
-**Workflow:** 02_database_workflow — Paso 04
-**Skill utilizado:** `database-schema-designer`
-**Entrada:** `02_modelo_conceptual/modelo_conceptual.md`, `diagrama_er.md`
-**Restricción:** atributos con dominio semántico (entero/decimal/cadena/fecha/booleano), PK/FK conceptuales, cardinalidades, sin sintaxis de motor (sin AUTO_INCREMENT, sin tipos MySQL/Postgres). Prefijos de módulo según decisión §3.
+**Workflow:** `02_database_workflow` — Paso 04  
+**Skill utilizado:** `database-schema-designer` (instalado en `.agents/skills/`)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red de 4 hospitales)  
+**Entrada:** `02_modelo_conceptual/modelo_conceptual.md`, `02_modelo_conceptual/diagrama_er.md`, `01_requisitos_datos/requisitos_datos.md`  
+**Restricción de esta fase:** Transformación del modelo conceptual a relacional con atributos formales, llaves primarias (PK), llaves foráneas (FK), dominios semánticos independientes de motor (sin tipos específicos de Postgres/MySQL), restricciones de unicidad (UNIQUE), no nulidad (NOT NULL) y restricciones lógicas (CHECK). No seleccionar motor físico todavía.  
 
-## 1. Criterios de diseño lógico
+---
 
-- Toda entidad recibe **PK surrogate** conceptual `id` salvo asociativas puras (`auth_usuario_rol`, `auth_rol_permiso`, `com_producto_promocion`) que usan PK compuesta.
-- Toda entidad de negocio lleva campos de auditoría obligatorios (§9): `user_create`, `user_update`, `user_created_at`, `user_update_at`.
-- Dinero: dominio `DECIMAL(12,2)` conceptual (validación de tipo exacto en Paso 07).
-- Borrado físico prohibido en tablas transaccionales (RN-08); entidades maestras: estado activo/inactivo, soft-delete pendiente DB-P12.
+## 1. Criterios de Diseño del Modelo Lógico
 
-## 2. Módulo auth (RF-001, RNF-030…033)
+1. **Claves Primarias (PK):** Toda tabla de negocio recibe una clave surrogate lógica `id` (dominio `entero` o `entero_grande`) excepto tablas asociativas puras (`org_cuadrilla_miembros`), catálogos con código estándar inmutable (`sec_roles`, `cat_causales`, `sla_calendarios`) o tablas de relación 1:1 estricta (`sol_control_tiempo_sla`, `sol_informes_atencion`).
+2. **Convención de Prefijos por Módulo:**
+   - `org_`: Estructura hospitalaria multisede, servicios y cuadrillas de turno.
+   - `sec_`: Identidad, usuarios y roles (RBAC).
+   - `cat_`: Catálogos tipificados de solicitudes y causales estandarizadas.
+   - `sla_`: Calendarios, días inhábiles y políticas de tiempos de respuesta.
+   - `sol_`: Núcleo transaccional de requerimientos, máquina de estados, bitácora y adjuntos.
+   - `ops_`: Operaciones del sistema, idempotencia y eventos outbox asíncronos.
+   - `audit_`: Pista inmutable y legal de auditoría del sistema.
+3. **Inmutabilidad y No Borrado Físico (RN-012, RN-013):**
+   - Prohibición formal de eliminación física: tablas maestras usan estado lógico (`activo`, `inactivo`).
+   - Tablas de historial (`sol_historial_estados`, `sol_bitacora`, `audit_eventos`) son estrictamente **append-only** (sin operaciones destructivas ni de modificación).
+4. **Almacenamiento Desacoplado de Evidencias (Restricción Técnica 5, D-04):**
+   - `sol_adjuntos` solo gestiona metadatos y referencias URI; no existen columnas BLOB ni binarias pesadas.
+5. **Control de Concurrencia Optimista (D-01, CA-004):**
+   - La tabla central `sol_solicitudes` incorpora la columna lógica `version` (`entero`, NOT NULL, DEFAULT 1).
 
-### auth_usuario
-| Atributo | Dominio | Restricción |
-|---|---|---|
-| id | entero | PK |
-| nombre | cadena | NOT NULL |
-| email | cadena | NOT NULL, UNIQUE |
-| hash_password | cadena | NOT NULL (Argon2id, §15) |
-| estado | enum(activo,inactivo) | NOT NULL, default activo |
-| user_create, user_update | referencia usuario | NOT NULL |
-| user_created_at, user_update_at | fecha | NOT NULL |
+---
 
-### auth_rol
-id PK; nombre NOT NULL UNIQUE; estado; auditoría.
+## 2. Especificación Detallada de Tablas Lógicas
 
-### auth_permiso
-id PK; codigo NOT NULL UNIQUE; descripcion; auditoría.
+---
 
-### auth_usuario_rol
-PK compuesta (usuario_id, rol_id); FK a auth_usuario, auth_rol; auditoría.
+### 2.1 Módulo Organización Multisede (`org_`)
 
-### auth_rol_permiso
-PK compuesta (rol_id, permiso_id); FK; auditoría.
+#### Tabla: `org_sedes` (RF-001)
+Representa cada uno de los hospitales de la red de salud.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero | PK | Identificador surrogate |
+| `codigo_institucional` | cadena(2) | NOT NULL, UNIQUE | Prefijo institucional (`H1` a `H4`) |
+| `nombre` | cadena(100) | NOT NULL | Nombre oficial del centro hospitalario |
+| `direccion` | cadena(255) | NULL | Dirección física de la sede |
+| `telefono` | cadena(50) | NULL | Central telefónica institucional |
+| `es_central` | booleano | NOT NULL, DEFAULT false | Indica si es el hospital central |
+| `estado` | cadena(20) | NOT NULL, DEFAULT 'activo' | CHECK in ('activo', 'inactivo') |
 
-### auth_token_blacklist (§15)
-id PK; token_hash NOT NULL UNIQUE; expira_en NOT NULL; creado_en NOT NULL. Índice por expira_en para purga.
+#### Tabla: `org_servicios` (RF-002)
+Áreas asistenciales y unidades resolutoras técnicas por sede.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero | PK | Identificador surrogate |
+| `sede_id` | entero | NOT NULL, FK $\rightarrow$ `org_sedes` | Hospital al que pertenece |
+| `codigo` | cadena(20) | NOT NULL | Código interno de servicio (ej. `QUIROF`, `BIOMED`) |
+| `nombre` | cadena(100) | NOT NULL | Nombre descriptivo del servicio |
+| `tipo_servicio` | cadena(20) | NOT NULL | CHECK in ('ASISTENCIAL', 'RESOLUTOR') |
+| `ubicacion_piso_area` | cadena(150) | NOT NULL | Piso, pabellón o ala específica |
+| `estado` | cadena(20) | NOT NULL, DEFAULT 'activo' | CHECK in ('activo', 'inactivo') |
+| *Restricción única:* | | UNIQUE (`sede_id`, `codigo`) | Código único dentro de la misma sede |
 
-## 3. Módulo core (RF-002, RF-010)
+#### Tabla: `org_cuadrillas_guardia` (RF-004)
+Equipos técnicos de turno rotativo para asignación de guardias 24/7.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero | PK | Identificador surrogate |
+| `sede_id` | entero | NOT NULL, FK $\rightarrow$ `org_sedes` | Sede hospitalaria de operación |
+| `servicio_resolutor_id` | entero | NOT NULL, FK $\rightarrow$ `org_servicios` | Unidad técnica (ej. Mantenimiento Biomédico) |
+| `nombre` | cadena(100) | NOT NULL | Nombre de cuadrilla (ej. `Guardia Biomédica Noche`) |
+| `turno_codigo` | cadena(20) | NOT NULL | CHECK in ('MANANA', 'TARDE', 'NOCHE', 'GUARDIA_24H') |
+| `estado` | cadena(20) | NOT NULL, DEFAULT 'activo' | CHECK in ('activo', 'inactivo') |
 
-### core_sucursal
-id PK; nombre NOT NULL; direccion; estado; auditoría.
+#### Tabla: `org_cuadrilla_miembros` (RF-004)
+Composición de personal técnico dentro de una cuadrilla de guardia.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `cuadrilla_id` | entero | NOT NULL, FK $\rightarrow$ `org_cuadrillas_guardia` | Cuadrilla de asignación |
+| `usuario_id` | entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Técnico miembro |
+| `fecha_incorporacion` | fecha_hora | NOT NULL | Fecha de alta en la cuadrilla |
+| *Clave primaria:* | | PK (`cuadrilla_id`, `usuario_id`) | Par único |
 
-### core_caja_pos
-id PK; sucursal_id FK→core_sucursal NOT NULL; codigo NOT NULL; estado; UNIQUE(sucursal_id, codigo); auditoría.
+---
 
-### core_cliente (DB-P08 abierto)
-id PK; nombre/razon NOT NULL; identificacion UNIQUE parcial (declamar DB-P08); email; telefono; estado; auditoría. Atributos finales sujetos a DB-P08.
+### 2.2 Módulo Seguridad y Acceso (`sec_`)
 
-## 4. Módulo catálogo (RF-020)
+#### Tabla: `sec_roles` (RF-003, RNF-031)
+Roles institucionales con perfiles de autorización RBAC y SoD.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `codigo` | cadena(30) | PK | Código de rol (`SOLICITANTE_ASISTENCIAL`, etc.) |
+| `nombre` | cadena(100) | NOT NULL | Nombre descriptivo del rol |
+| `descripcion` | cadena(255) | NULL | Alcance de responsabilidades |
+| `permisos_json` | json | NOT NULL | Matriz de permisos funcionales |
 
-### cat_categoria
-id PK; nombre NOT NULL; categoria_padre_id FK→cat_categoria NULL; estado; auditoría. CHECK: no auto-referencia (id <> padre).
+#### Tabla: `sec_usuarios` (RF-003, RNF-030, RNF-031)
+Cuentas de usuario integradas con Directorio Activo/LDAP corporativo.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero | PK | Identificador surrogate |
+| `username_ldap` | cadena(50) | NOT NULL, UNIQUE | Identificador de red corporativa |
+| `email_corporativo` | cadena(100) | NOT NULL, UNIQUE | Correo institucional para notificaciones |
+| `nombre_completo` | cadena(150) | NOT NULL | Nombre profesional del funcionario |
+| `sede_id` | entero | NOT NULL, FK $\rightarrow$ `org_sedes` | Hospital de radicación principal |
+| `servicio_id` | entero | NOT NULL, FK $\rightarrow$ `org_servicios` | Servicio de adscripción |
+| `rol_codigo` | cadena(30) | NOT NULL, FK $\rightarrow$ `sec_roles` | Perfil de privilegios |
+| `estado` | cadena(20) | NOT NULL, DEFAULT 'activo' | CHECK in ('activo', 'inactivo') |
+| `ultimo_acceso_at` | fecha_hora | NULL | Registro de auditoría de conexión |
+| `created_at` | fecha_hora | NOT NULL | Fecha de alta en el sistema |
 
-### cat_producto
-id PK; sku NOT NULL UNIQUE; nombre NOT NULL; categoria_id FK NOT NULL; unidad NOT NULL; estado; auditoría.
+---
 
-### cat_precio (DB-P09 CERRADO: precios por sucursal)
-id PK; sucursal_id FK NOT NULL; producto_id FK NOT NULL; monto DECIMAL(12,2) NOT NULL CHECK monto>=0; moneda NOT NULL; vigente_desde NOT NULL; vigente_hasta NULL; auditoría. UNIQUE(sucursal_id, producto_id, vigente_desde) para evitar dobles versiones simultáneas por sucursal (resuelto en Paso 08 + cierre DB-P09).
+### 2.3 Módulo Catálogos y Políticas de SLA (`cat_` y `sla_`)
 
-### cat_promocion
-id PK; nombre NOT NULL; reglas (texto/JSON lógico); vigente_desde/hasta; estado; auditoría.
+#### Tabla: `cat_solicitud_tipos` (RF-010)
+Clasificación tipificada de requerimientos por unidad técnica resolutora.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero | PK | Identificador surrogate |
+| `servicio_resolutor_id` | entero | NOT NULL, FK $\rightarrow$ `org_servicios` | Área técnica responsable |
+| `codigo_tipo` | cadena(20) | NOT NULL | Código tipificado (ej. `BIO-FALLA-VENT`) |
+| `nombre` | cadena(120) | NOT NULL | Nombre de la avería o requerimiento |
+| `descripcion` | texto | NULL | Guía de diagnóstico inicial |
+| `prioridad_sugerida` | cadena(20) | NOT NULL | CHECK in ('VITAL', 'ALTA', 'MEDIA', 'BAJA') |
+| `estado` | cadena(20) | NOT NULL, DEFAULT 'activo' | CHECK in ('activo', 'inactivo') |
+| *Restricción única:* | | UNIQUE (`servicio_resolutor_id`, `codigo_tipo`) | Código único por especialidad |
 
-### com_producto_promocion (asociativa)
-PK compuesta (producto_id, promocion_id); FK; auditoría.
+#### Tabla: `cat_causales` (RF-014)
+Catálogo estandarizado de motivos para suspensiones, rechazos y reaperturas.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `codigo` | cadena(30) | PK | Código de causal (ej. `FALTA_REPUESTO_BODEGA`) |
+| `tipo_causal` | cadena(30) | NOT NULL | CHECK in ('SUSPENSION_ESPERA', 'RECHAZO_TECNICO', 'CANCELACION_USUARIO', 'REAPERTURA') |
+| `descripcion` | cadena(200) | NOT NULL | Descripción formal de la justificación |
+| `estado` | cadena(20) | NOT NULL, DEFAULT 'activo' | CHECK in ('activo', 'inactivo') |
 
-## 5. Módulo compras (RF-030, RF-031, RN-05)
+#### Tabla: `sla_calendarios` (RF-013)
+Definición de calendarios para cómputo dual de tiempos de SLA.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `codigo_calendario` | cadena(30) | PK | CHECK in ('CONTINUO_24_7', 'HABIL_ADMINISTRATIVO') |
+| `nombre` | cadena(100) | NOT NULL | Nombre descriptivo del calendario |
+| `hora_inicio` | hora | NOT NULL | Hora de inicio jornada (ej. 08:00:00) |
+| `hora_fin` | hora | NOT NULL | Hora de fin jornada (ej. 17:00:00) |
+| `dias_laborales_semana`| cadena(20) | NOT NULL | Días aplicables (ej. '1,2,3,4,5' para Lun-Vie) |
 
-### com_proveedor
-id PK; nombre NOT NULL; contacto; estado; auditoría; identificador lógico único (nombre o codigo — definir en Paso 08).
+#### Tabla: `sla_dias_inhabiles` (RF-013)
+Días feriados y festividades que pausan el cómputo hábil administrativo.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero | PK | Identificador surrogate |
+| `fecha` | fecha | NOT NULL | Día festivo inhábil |
+| `descripcion` | cadena(100) | NOT NULL | Motivo del feriado institucional |
+| `sede_id` | entero | NULL, FK $\rightarrow$ `org_sedes` | NULL si es feriado general; sede si es local |
+| *Restricción única:* | | UNIQUE (`fecha`, `sede_id`) | No duplicar feriados por sede |
 
-### com_orden_compra
-id PK; numero NOT NULL UNIQUE; proveedor_id FK NOT NULL; estado enum; fecha_orden NOT NULL; total DECIMAL(12,2); auditoría.
+#### Tabla: `sla_politicas` (RF-011, RF-012)
+Tiempos límites máximos de respuesta (MTTA) y resolución (MTTR).
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero | PK | Identificador surrogate |
+| `tipo_solicitud_id` | entero | NOT NULL, FK $\rightarrow$ `cat_solicitud_tipos` | Tipo de requerimiento |
+| `prioridad_asistencial` | cadena(20) | NOT NULL | CHECK in ('VITAL', 'ALTA', 'MEDIA', 'BAJA') |
+| `tiempo_max_respuesta_mtta_min` | entero | NOT NULL, CHECK > 0 | Plazo máx. primera asignación (minutos) |
+| `tiempo_max_resolucion_mttr_min` | entero | NOT NULL, CHECK > 0 | Plazo máx. resolución final (minutos) |
+| `calendario_codigo` | cadena(30) | NOT NULL, FK $\rightarrow$ `sla_calendarios` | Calendario aplicable (24/7 vs hábil) |
+| *Restricción única:* | | UNIQUE (`tipo_solicitud_id`, `prioridad_asistencial`) | Una política por combinación |
 
-### com_orden_compra_item
-id PK; orden_id FK NOT NULL; producto_id FK NOT NULL; cantidad INT NOT NULL CHECK>0; precio_pactado DECIMAL(12,2) NOT NULL CHECK>=0; auditoría. UNIQUE(orden_id, producto_id).
+---
 
-### com_recepcion
-id PK; orden_id FK NOT NULL; estado enum(draft,confirmada) NOT NULL; fecha NOT NULL; usuario_confirma FK→auth_usuario; auditoría. Solo estado confirmada mueve inventario (RN-05).
+### 2.4 Módulo Transaccional de Solicitudes (`sol_`)
 
-### com_recepcion_item
-id PK; recepcion_id FK NOT NULL; producto_id FK NOT NULL; cantidad_recibida INT NOT NULL CHECK>0; auditoría.
+#### Tabla: `sol_solicitudes` (RF-020 a RF-030, RN-001, RN-005, D-01)
+Entidad transaccional central del ciclo de vida de requerimientos.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK | Identificador surrogate primario |
+| `codigo_correlativo` | cadena(20) | NOT NULL, UNIQUE | Formato `H{sede}-{año}-{secuencial}` (RN-001) |
+| `sede_id` | entero | NOT NULL, FK $\rightarrow$ `org_sedes` | Sede hospitalaria generadora |
+| `servicio_solicitante_id`| entero | NOT NULL, FK $\rightarrow$ `org_servicios` | Unidad clínica que requiere el servicio |
+| `servicio_resolutor_id` | entero | NOT NULL, FK $\rightarrow$ `org_servicios` | Unidad técnica que debe atender |
+| `tipo_solicitud_id` | entero | NOT NULL, FK $\rightarrow$ `cat_solicitud_tipos` | Clasificación tipificada |
+| `ubicacion_especifica` | cadena(150) | NOT NULL | Quirófano, sala, piso o cama clínica |
+| `prioridad_asistencial` | cadena(20) | NOT NULL | CHECK in ('VITAL', 'ALTA', 'MEDIA', 'BAJA') |
+| `descripcion_falla` | texto | NOT NULL | Detalle técnico (estricto Zero-PHI, RNF-035) |
+| `estado` | cadena(30) | NOT NULL, DEFAULT 'Registrada' | CHECK in ('Registrada', 'Asignada', 'En Proceso', 'En Espera', 'Atendida', 'Cerrada', 'Rechazada', 'Cancelada') |
+| `es_expedita` | booleano | NOT NULL, DEFAULT false | Indica si proviene de radicación rápida (RF-021) |
+| `usuario_solicitante_id`| entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Funcionario que radicó la orden |
+| `tecnico_asignado_id` | entero | NULL, FK $\rightarrow$ `sec_usuarios` | Técnico resolutor responsable directo |
+| `cuadrilla_asignada_id` | entero | NULL, FK $\rightarrow$ `org_cuadrillas_guardia` | Cuadrilla de turno activa asignada |
+| `version` | entero | NOT NULL, DEFAULT 1 | Bloqueo optimista contra colisiones (D-01) |
+| `fecha_radicacion_utc` | fecha_hora | NOT NULL | Estampa de creación del servidor en UTC |
+| `fecha_asignacion_utc` | fecha_hora | NULL | Estampa de asignación de técnico/cuadrilla |
+| `fecha_inicio_proceso_utc`| fecha_hora | NULL | Estampa de pase a 'En Proceso' |
+| `fecha_atencion_utc` | fecha_hora | NULL | Estampa de registro del informe de atención |
+| `fecha_cierre_utc` | fecha_hora | NULL | Estampa de conformidad o auto-cierre |
+| `updated_at_utc` | fecha_hora | NOT NULL | Estampa de última modificación |
 
-## 6. Módulo inventario (RF-040…042, RF-062, RF-064, RN-01…RN-06, D-01)
+#### Tabla: `sol_control_tiempo_sla` (RF-051, RF-052, RN-006)
+Control temporal continuo y suspensión regulada de plazos de SLA.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `solicitud_id` | entero_grande | PK, FK $\rightarrow$ `sol_solicitudes` | Relación 1:1 con la solicitud |
+| `calendario_codigo` | cadena(30) | NOT NULL, FK $\rightarrow$ `sla_calendarios` | Tipo de reloj temporal aplicado |
+| `fecha_compromiso_mtta_utc`| fecha_hora | NOT NULL | Límite pactado para primera respuesta |
+| `fecha_compromiso_mttr_utc`| fecha_hora | NOT NULL | Límite pactado para resolución final |
+| `segundos_consumidos` | entero | NOT NULL, DEFAULT 0 | Tiempo transcurrido activo del reloj |
+| `esta_pausado` | booleano | NOT NULL, DEFAULT false | True si está en estado 'En Espera' |
+| `fecha_ultima_pausa_utc` | fecha_hora | NULL | Momento en que se congeló el reloj |
+| `segundos_pausados_acumulados`| entero | NOT NULL, DEFAULT 0 | Sumatoria total de tiempo suspendido |
+| `fecha_tentativa_reanudacion` | fecha | NULL | Compromiso de reanudación (RN-006) |
+| `alerta_75_emitida` | booleano | NOT NULL, DEFAULT false | Alerta preventiva disparada al 75% |
+| `escalamiento_100_emitido`| booleano | NOT NULL, DEFAULT false | Escalamiento jerárquico disparado al 100% |
 
-### inv_inventario
-| Atributo | Dominio | Restricción |
-|---|---|---|
-| id | entero | PK |
-| producto_id | FK→cat_producto | NOT NULL, UNIQUE(producto_id, sucursal_id) |
-| sucursal_id | FK→core_sucursal | NOT NULL |
-| stock_available | entero | NOT NULL, CHECK >=0 |
-| stock_reserved | entero | NOT NULL, CHECK >=0 |
-| stock_sold | entero | NOT NULL, CHECK >=0 |
-| version | entero | NOT NULL, default 0 (optimistic si se necesita) |
-| auditoría | estándar | NOT NULL |
+#### Tabla: `sol_historial_estados` (RF-040, RN-005, RN-012, RN-013)
+Pista append-only inmutable de transiciones de estado deterministas.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK, append-only | Identificador de transición |
+| `solicitud_id` | entero_grande | NOT NULL, FK $\rightarrow$ `sol_solicitudes` | Requerimiento intervenido |
+| `estado_anterior` | cadena(30) | NOT NULL | Estado previo de la máquina finita |
+| `estado_nuevo` | cadena(30) | NOT NULL | Estado posterior de la máquina finita |
+| `causal_codigo` | cadena(30) | NULL, FK $\rightarrow$ `cat_causales` | Causal estandarizada (obligatoria en suspensión/rechazo) |
+| `motivo_texto` | texto | NULL | Justificación textual ($\ge 20$ car. en rechazo/canc.) |
+| `usuario_id` | entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Funcionario autor de la transición |
+| `ip_origen` | cadena(45) | NOT NULL | Dirección IP institucional del cliente |
+| `created_at_utc` | fecha_hora | NOT NULL | Estampa temporal UTC del servidor |
 
-RN-02 se refuerza: `stock_available >= 0` y `stock_available` nunca cubierto por reservas; detalle de locking en Paso 12.
+#### Tabla: `sol_informes_atencion` (RF-044, RN-007)
+Informe técnico obligatorio previo a la transición a 'Atendida' o 'Cerrada'.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `solicitud_id` | entero_grande | PK, FK $\rightarrow$ `sol_solicitudes` | Relación 1:1 obligatoria |
+| `diagnostico_falla` | texto | NOT NULL | Causa raíz técnica identificada |
+| `acciones_ejecutadas` | texto | NOT NULL | Reparaciones y calibraciones efectuadas |
+| `tiempo_real_minutos` | entero | NOT NULL, CHECK > 0 | Dedicación efectiva del personal técnico |
+| `condicion_final_activo` | cadena(100) | NOT NULL | Condición operativa resultante del equipo |
+| `repuestos_utilizados_json`| json | NOT NULL | Insumos usados (o `[]` si no requirió) |
+| `tecnico_responsable_id` | entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Profesional que certifica el trabajo |
+| `created_at_utc` | fecha_hora | NOT NULL | Fecha y hora de finalización técnica |
 
-### inv_reserva (DB-P01/P02 CERRADOS 2026-09-22: bloqueo SÍ, TTL 15 min)
-id PK; orden_id FK→sales_orden_venta NOT NULL; inventario_id FK NOT NULL; cantidad INT CHECK>0; estado enum(pending,confirmed,expired,cancelled) NOT NULL; expira_en NOT NULL (RN-03, umbral de core_configuracion `reserva_ttl_minutos=15`); creado_en; auditoría.
+#### Tabla: `sol_reaperturas` (RF-047, RN-010)
+Registro de reaperturas excepcionales dentro de la ventana de 48 horas post-atención.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK | Identificador de reapertura |
+| `solicitud_id` | entero_grande | NOT NULL, FK $\rightarrow$ `sol_solicitudes` | Solicitud reabierta |
+| `causal_codigo` | cadena(30) | NOT NULL, FK $\rightarrow$ `cat_causales` | Causal de inconformidad catalogada |
+| `motivo_inconformidad` | texto | NOT NULL | Justificación detallada ($\ge 20$ caracteres) |
+| `usuario_solicitante_id`| entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Solicitante que rechaza el cierre |
+| `created_at_utc` | fecha_hora | NOT NULL | Estampa UTC ($\le 48\text{ h}$ post-atención) |
 
-### inv_movimiento_inventario (append-only, RN-01, RF-090)
-id PK; inventario_id FK NOT NULL; producto_id FK NOT NULL; sucursal_id FK NOT NULL; tipo enum(entrada,salida,reserva,liberacion,ajuste,devolucion,transferencia_salida,transferencia_entrada,recepcion) NOT NULL; cantidad INT NOT NULL CHECK<>0; referencia_tipo STRING; referencia_id entero; usuario_id FK NOT NULL; motivo TEXT; fecha NOT NULL; auditoría. **Sin UPDATE/DELETE de negocio** (solo columns de auditoría).
+#### Tabla: `sol_reasignaciones` (RF-031, RN-008)
+Auditoría formal de cambios de técnico responsable o cuadrilla asignada.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK | Identificador de reasignación |
+| `solicitud_id` | entero_grande | NOT NULL, FK $\rightarrow$ `sol_solicitudes` | Solicitud reasignada |
+| `tecnico_anterior_id` | entero | NULL, FK $\rightarrow$ `sec_usuarios` | Técnico saliente |
+| `tecnico_nuevo_id` | entero | NULL, FK $\rightarrow$ `sec_usuarios` | Técnico entrante |
+| `cuadrilla_anterior_id` | entero | NULL, FK $\rightarrow$ `org_cuadrillas_guardia` | Cuadrilla saliente |
+| `cuadrilla_nueva_id` | entero | NULL, FK $\rightarrow$ `org_cuadrillas_guardia` | Cuadrilla entrante |
+| `motivo` | texto | NOT NULL | Causal justificada del cambio de guardia |
+| `usuario_autorizador_id`| entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Supervisor que autoriza el cambio |
+| `created_at_utc` | fecha_hora | NOT NULL | Estampa temporal de la reasignación |
 
-### inv_ajuste_stock (RN-04)
-id PK; inventario_id FK NOT NULL; cantidad INT NOT NULL CHECK<>0; motivo TEXT NOT NULL; usuario_id FK NOT NULL; fecha NOT NULL; auditoría. Genera inv_movimiento_inventario tipo=ajuste.
+#### Tabla: `sol_bitacora` (RF-060)
+Bitácora cronológica inmutable append-only para notas técnicas y seguimiento.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK, append-only | Identificador de entrada de bitácora |
+| `solicitud_id` | entero_grande | NOT NULL, FK $\rightarrow$ `sol_solicitudes` | Solicitud asociada |
+| `tipo_entrada` | cadena(30) | NOT NULL | CHECK in ('NOTA_TECNICA', 'CAMBIO_GUARDIA', 'PIEZA_SOLICITADA', 'COMUNICACION') |
+| `contenido` | texto | NOT NULL | Texto informativo del evento técnico |
+| `usuario_id` | entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Autor de la nota |
+| `ip_origen` | cadena(45) | NOT NULL | Dirección IP del cliente |
+| `created_at_utc` | fecha_hora | NOT NULL | Estampa temporal del servidor en UTC |
 
-### inv_transferencia (RN-06)
-id PK; sucursal_origen_id FK NOT NULL; sucursal_destino_id FK NOT NULL CHECK(origen<>destino); estado enum(draft,in_transit,received,cancelled) NOT NULL; usuario_id FK NOT NULL; fechas; auditoría.
+#### Tabla: `sol_adjuntos` (RF-022, Restricción Técnica 5, D-04)
+Metadatos y referencias URI de evidencias técnicas desacopladas (hasta 5 MB).
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK | Identificador del adjunto |
+| `solicitud_id` | entero_grande | NOT NULL, FK $\rightarrow$ `sol_solicitudes` | Solicitud que lo anexa |
+| `nombre_archivo_original`| cadena(255) | NOT NULL | Nombre provisto por el usuario |
+| `uuid_almacenamiento` | cadena(36) | NOT NULL, UNIQUE | Nombre físico ofuscado (UUID v4) |
+| `tipo_mime_real` | cadena(100) | NOT NULL | Inspección de magic numbers |
+| `extension` | cadena(10) | NOT NULL | CHECK in ('pdf', 'jpg', 'jpeg', 'png') |
+| `tamano_bytes` | entero_grande | NOT NULL | CHECK (tamano_bytes > 0 AND tamano_bytes <= 5242880) |
+| `hash_sha256` | cadena(64) | NOT NULL | Verificador criptográfico de integridad |
+| `uri_almacenamiento` | cadena(500) | NOT NULL | Ruta en NAS/NFS o URI en MinIO S3 |
+| `usuario_id` | entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Funcionario que subió la evidencia |
+| `created_at_utc` | fecha_hora | NOT NULL | Estampa temporal de subida |
 
-### inv_transferencia_item
-id PK; transferencia_id FK NOT NULL; producto_id FK NOT NULL; cantidad INT CHECK>0; auditoría. UNIQUE(transferencia_id, producto_id).
+---
 
-## 7. Módulo ventas (RF-050, RF-051, RF-060…RF-064, RF-070, RN-07, RN-08)
+### 2.5 Módulo Operacional y Auditoría Legal (`ops_` y `audit_`)
 
-### sales_orden_venta
-| Atributo | Dominio | Restricción |
-|---|---|---|
-| id | entero | PK |
-| numero | cadena | NOT NULL, UNIQUE |
-| canal | enum(pos,web) | NOT NULL |
-| cliente_id | FK→core_cliente | NULL en POS (DB-P08) |
-| sucursal_id | FK→core_sucursal | NOT NULL |
-| estado | enum | NOT NULL (pending/pagada/confirmada/cancelada/devuelta) |
-| total | DECIMAL(12,2) | NOT NULL CHECK>=0 |
-| idempotency_key | cadena | UNIQUE, NOT NULL en web (RN-07) |
-| fulfillment_type | enum(entrega,retiro) | NULL en POS; DB-P10 |
-| fulfillment_direccion / fecha_entrega | cadena/fecha | NULL; DB-P10 |
-| creado_en / confirmado_en | fecha | auditoría estándar |
+#### Tabla: `ops_idempotencia` (RF-023, RN-011, D-03)
+Registro de tokens de idempotencia para protección contra reintentos de red Wi-Fi.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `idempotency_key` | cadena(36) | PK | Clave UUID v4 enviada en cabecera HTTP |
+| `usuario_id` | entero | NOT NULL, FK $\rightarrow$ `sec_usuarios` | Usuario emisor de la petición |
+| `recurso_tipo` | cadena(50) | NOT NULL | 'RADICACION_SOLICITUD', 'TRANSICION_ESTADO' |
+| `request_hash_sha256` | cadena(64) | NOT NULL | Hash del cuerpo HTTP entrante |
+| `response_status_http` | entero | NOT NULL | Código de respuesta generado (200, 201) |
+| `response_body_json` | json | NOT NULL | Payload de respuesta original serializado |
+| `created_at_utc` | fecha_hora | NOT NULL | Fecha de creación del registro |
+| `expires_at_utc` | fecha_hora | NOT NULL | Expiración TTL (24 horas tras creación) |
 
-### sales_orden_venta_item
-id PK; orden_id FK NOT NULL; producto_id FK NOT NULL; cantidad INT CHECK>0; precio_unitario DECIMAL(12,2) CHECK>=0; subtotal DECIMAL(12,2); auditoría. UNIQUE(orden_id, producto_id).
+#### Tabla: `ops_outbox_eventos` (RF-052, RF-053, RNF-041, D-06)
+Patrón Transactional Outbox para eventos de SLA y notificaciones asíncronas.
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK | Identificador secuencial del evento |
+| `tipo_evento` | cadena(50) | NOT NULL | CHECK in ('ALERTA_SLA_75', 'ESCALAMIENTO_SLA_100', 'DESPACHO_EMAIL_SMTP', 'AUTO_CIERRE_48H') |
+| `agregado_tipo` | cadena(50) | NOT NULL | 'SOLICITUD', 'USUARIO' |
+| `agregado_id` | entero_grande | NOT NULL | Identificador de la solicitud asociada |
+| `payload_json` | json | NOT NULL | Parámetros del evento para el worker |
+| `estado` | cadena(20) | NOT NULL, DEFAULT 'PENDIENTE' | CHECK in ('PENDIENTE', 'PROCESANDO', 'ENVIADO', 'FALLIDO') |
+| `reintentos` | entero | NOT NULL, DEFAULT 0 | Contador de intentos de entrega |
+| `error_mensaje` | texto | NULL | Traza de error en caso de fallo SMTP |
+| `scheduled_at_utc` | fecha_hora | NOT NULL | Momento programado para ejecución |
+| `processed_at_utc` | fecha_hora | NULL | Estampa en que se completó el evento |
+| `created_at_utc` | fecha_hora | NOT NULL | Fecha de inserción transaccional |
 
-### sales_carrito_web (B-3 CONFIRMADO 2026-09-22: persiste en BD)
-id PK; cliente_id FK NULL; sesion_key UNIQUE NOT NULL; actualizado_en; auditoría. **TTL de purga = parámetro abierto** (no inventar).
+#### Tabla: `audit_eventos` (RF-072, RN-012, RN-013)
+Pista legal de auditoría del sistema hospitalario (retención mínima de 5 años).
+| Atributo | Dominio Lógico | Restricciones | Descripción |
+| :--- | :--- | :--- | :--- |
+| `id` | entero_grande | PK, append-only | Identificador de auditoría |
+| `usuario_id` | entero | NOT NULL | Usuario ejecutor de la operación |
+| `ip_origen` | cadena(45) | NOT NULL | Dirección IP del cliente |
+| `accion` | cadena(50) | NOT NULL | 'CREAR', 'ASIGNAR', 'TRANSICIONAR', 'REABRIR' |
+| `tabla_afectada` | cadena(50) | NOT NULL | Tabla sobre la que se actuó |
+| `registro_id` | entero_grande | NOT NULL | Identificador del registro modificado |
+| `datos_anteriores_json`| json | NULL | Estado previo del registro |
+| `datos_nuevos_json` | json | NULL | Estado resultante tras la transacción |
+| `hash_encadenado_sha256`| cadena(64) | NOT NULL | Firma criptográfica encadenada de no repudio |
+| `correlation_id` | cadena(36) | NULL | Identificador distribuido `X-Correlation-ID` |
+| `created_at_utc` | fecha_hora | NOT NULL | Estampa temporal inmutable del servidor |
 
-### sales_carrito_web_item
-id PK; carrito_id FK NOT NULL; producto_id FK NOT NULL; cantidad CHECK>0; auditoría. UNIQUE(carrito_id, producto_id).
+---
 
-### sales_devolucion (RF-070, RN-08)
-id PK; orden_original_id FK→sales_orden_venta NOT NULL; cliente_id FK NULL; usuario_id FK NOT NULL; estado enum; motivo TEXT; monto DECIMAL(12,2); fechas; auditoría. **Registro nuevo; no muta la orden original.**
+## 3. Matriz de Claves Foráneas y Acciones Referenciales
 
-### sales_devolucion_item
-id PK; devolucion_id FK NOT NULL; producto_id FK NOT NULL; producto_orden_item_id FK→sales_orden_venta_item NOT NULL; cantidad CHECK>0; monto DECIMAL(12,2); auditoría.
+| Tabla Origen | Clave Foránea (FK) | Tabla Destino | Acción ON DELETE | Acción ON UPDATE | Justificación de Negocio |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `org_servicios` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | No se puede eliminar una sede con servicios activos. |
+| `sec_usuarios` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | Un usuario debe estar ligado a una sede válida. |
+| `sec_usuarios` | `servicio_id` | `org_servicios` | `RESTRICT` | `CASCADE` | Un usuario pertenece a un servicio existente. |
+| `sec_usuarios` | `rol_codigo` | `sec_roles` | `RESTRICT` | `CASCADE` | El rol debe existir en el catálogo RBAC. |
+| `cat_solicitud_tipos` | `servicio_resolutor_id` | `org_servicios` | `RESTRICT` | `CASCADE` | Las fallas tipificadas pertenecen a áreas técnicas reales. |
+| `sla_politicas` | `tipo_solicitud_id` | `cat_solicitud_tipos` | `RESTRICT` | `CASCADE` | Una política de SLA requiere un tipo de solicitud válido. |
+| `sol_solicitudes` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | Una solicitud pertenece a una sede hospitalaria inmutable. |
+| `sol_solicitudes` | `servicio_solicitante_id` | `org_servicios` | `RESTRICT` | `CASCADE` | El servicio clínico solicitante es obligatorio. |
+| `sol_solicitudes` | `servicio_resolutor_id` | `org_servicios` | `RESTRICT` | `CASCADE` | El servicio técnico resolutor es obligatorio. |
+| `sol_solicitudes` | `tipo_solicitud_id` | `cat_solicitud_tipos` | `RESTRICT` | `CASCADE` | Requerimiento catalogado obligatorio. |
+| `sol_solicitudes` | `usuario_solicitante_id`| `sec_usuarios` | `RESTRICT` | `CASCADE` | El autor de la radicación es rastreable (no repudio). |
+| `sol_solicitudes` | `tecnico_asignado_id` | `sec_usuarios` | `SET NULL` | `CASCADE` | Si un técnico se desvincula, la solicitud queda reasignable. |
+| `sol_control_tiempo_sla`| `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Integridad 1:1 con el requerimiento. |
+| `sol_historial_estados` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Inmutabilidad: no se eliminan historiales. |
+| `sol_informes_atencion` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | El informe está atado a la solicitud de forma indisoluble. |
+| `sol_adjuntos` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Los adjuntos pertenecen a la solicitud y no se borran en cascada. |
 
-## 8. Módulo pagos (RF-063, D-02, D-03, §16)
+---
 
-### pay_transaccion_pago
-id PK; orden_id FK NOT NULL; proveedor_pago STRING NOT NULL; referencia_externa STRING NOT NULL; monto DECIMAL(12,2) CHECK>0; estado enum(initiated,authorized,failed,refunded,compensated) NOT NULL; idempotency_key STRING NOT NULL UNIQUE; fechas; auditoría. UNIQUE(proveedor_pago, referencia_externa).
+## 4. Normalización y Consistencia Lógica
 
-### pay_outbox_evento (§16)
-id PK; agregado_tipo STRING NOT NULL; agregado_id entero NOT NULL; evento_tipo STRING NOT NULL; payload JSON/TEXT NOT NULL; estado enum(pending,processing,processed,failed) NOT NULL; claimed_at fecha NULL; correlation_id STRING NOT NULL; creado_en; procesado_en; reintentos INT default 0. **Insert en la misma transacción de dominio.**
+- El modelo alcanza **Tercera Forma Normal (3FN)** completa y forma **BCNF**:
+  - No existen grupos repetitivos (1FN).
+  - No existen dependencias funcionales parciales sobre claves compuestas (2FN).
+  - No existen dependencias transitivas entre atributos no clave (3FN): las entidades maestras (`org_sedes`, `org_servicios`, `cat_solicitud_tipos`, `sla_calendarios`) aíslan sus propios atributos sin redundancia en `sol_solicitudes`.
+- Los datos variables no predecibles (repuestos utilizados, parámetros de eventos y matrices de permisos) se modelan conceptualmente en estructuras estructuradas de dominio `json` sin violar la atomicidad relacional de los atributos de consulta principal.
 
-### core_idempotency_key (D-03)
-key STRING PK (UUID); operacion STRING NOT NULL; respuesta TEXT; expiracion NOT NULL (retención 30 días inicial, validar Paso 07); creado_en NOT NULL.
+---
 
-## 9. Módulo sistema (RF-080, RF-090, RF-100, RNF-050)
+## 5. Conclusión y Traspaso de Etapa
 
-### core_configuracion (RF-100, RNF-002)
-id PK; clave STRING NOT NULL UNIQUE; valor TEXT NOT NULL; descripcion; user_update; user_update_at. (Auditoría de creación igual que estándar.)
+El modelo lógico relacional del **Sistema S3IH** formaliza 16 tablas con todas sus columnas, claves primarias, claves foráneas, restricciones de unicidad, no nulidad y reglas de chequeo lógico, listo para su validación de normalización formal.
 
-### core_auditoria (RF-090)
-id PK; accion STRING NOT NULL; entidad_tipo STRING NOT NULL; entidad_id entero NOT NULL; datos_previos TEXT; datos_nuevos TEXT; usuario_id FK NOT NULL; motivo TEXT; fecha NOT NULL; correlation_id STRING. Solo INSERT.
-
-### Índices lógicos (se materializan en Paso 11)
-Todas las FK serán indexadas; además: inv_inventario(producto_id, sucursal_id) UNIQUE, sales_orden_venta(numero) UNIQUE, pay_outbox_evento(estado, creado_en), core_auditoria(entidad_tipo, entidad_id, fecha).
-
-## 10. Trazabilidad resumen
-
-| Módulo | RF principales | RN principales |
-|---|---|---|
-| auth | RF-001 | — |
-| core | RF-002, RF-010, RF-100 | RN-07 (config) |
-| catálogo | RF-020 | — |
-| compras | RF-030, RF-031 | RN-05 |
-| inventario | RF-040…042, RF-062, RF-064 | RN-01…RN-04, RN-06 |
-| ventas | RF-050, RF-051, RF-060…064, RF-070 | RN-07, RN-08 |
-| pagos | RF-063 | RN-07 (idempotencia) |
-| sistema | RF-080, RF-090 | RN-08 |
-
-## 11. Criterios de salida
-
-- [x] Toda entidad del E-R con atributos y dominios semánticos.
-- [x] PK/FK/cardinalidades definidos; PK compuesta en asociativas.
-- [x] Auditoría estándar en todas las tablas de negocio.
-- [x] Pendientes DB-P01…DB-P12 y supuesto del carrito declarados.
-- [x] Sin SQL ni tipos de motor concreto.
-
-**Estado:** Paso 04 COMPLETADO → siguiente: Paso 05 (`04_normalizacion/informe_normalizacion.md`).
+El siguiente paso obligatorio corresponde a:
+> **Paso 05 — Normalización (`04_normalizacion/informe_normalizacion.md`):**  
+> Someter el modelo lógico a la verificación rigurosa de 1FN, 2FN, 3FN y BCNF, analizando dependencias funcionales y justificando la ausencia de anomalías de inserción, actualización o borrado bajo el skill `database-schema-designer`.

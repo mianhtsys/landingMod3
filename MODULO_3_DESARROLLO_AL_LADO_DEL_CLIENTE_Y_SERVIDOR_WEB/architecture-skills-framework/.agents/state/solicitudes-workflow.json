@@ -1,0 +1,32 @@
+{
+    "workflow": "08_solicitudes_workflow",
+    "phase": "solicitudes_hospitalarias",
+    "scope": [
+        "org_sedes",
+        "org_servicios",
+        "cat_solicitud_tipos",
+        "sla_politicas",
+        "sol_solicitudes",
+        "sol_historial_estados",
+        "ops_outbox_eventos"
+    ],
+    "current_checkpoint": "CP-SOL-08",
+    "technical_status": "PASSED",
+    "human_status": "PENDING",
+    "last_completed": "CP-SOL-08",
+    "blocked": false,
+    "can_continue": false,
+    "next": "Workflow 08 (solicitudes_hospitalarias) completado al 100%. Esperar aprobación humana final para consolidación arquitectónica y cierre.",
+    "evidence": {
+        "suite": "proyecto/06_codigo/tests/test_cp_sol_08_e2e.php",
+        "results": "26/26 PASSED (Suite Consolidada E2E) | 255/255 PASSED en todo Workflow 08",
+        "cobertura_ciclo_completo": [
+            "Fase 1: Catálogos maestros activos de las 4 sedes, servicios clínicos y políticas SLA",
+            "Fase 2: Generación concurrente y atómica de correlativos inmutables H{sede}-{año}-{secuencial}",
+            "Fase 3: Radicación dual (Estándar vs. Expedita de Soporte Vital), filtro Zero-PHI (RNF-035) e Idempotency-Key",
+            "Fase 4: Máquina de Estados Finita FSM (RN-005), concurrencia optimista por versión (D-01 con 409 Conflict), terminalidad inmutable y bitácora forense append-only",
+            "Fase 5: Vistas web asistenciales (/solicitudes, /solicitudes/radicar, /solicitudes/{id}) con cero SQL en vista, renderizado contextual e integración Fetch",
+            "Fase 6: Worker CLI asíncrono bin/s3ih-worker.php con consumo de Transactional Outbox (FOR UPDATE SKIP LOCKED), alertas preventivas SLA al 75% y escalamientos jerárquicos al 100%"
+        ]
+    }
+}

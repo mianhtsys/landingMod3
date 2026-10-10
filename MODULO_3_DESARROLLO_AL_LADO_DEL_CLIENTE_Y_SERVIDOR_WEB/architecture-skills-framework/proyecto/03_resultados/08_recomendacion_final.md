@@ -1,480 +1,217 @@
-# Recomendación Final — Sistema Tienda Omnicanal de Alimentos
+# Recomendación Arquitectónica Final y ADR — Sistema Hospitalario S3IH
 
-Fecha: 2026-09-17
-Autor: solution-leader
-Fuentes: 01-07_análisis + adversarial review
-
----
-
-## 1. Matriz de Decisión por Dominio
-
-| Decisión | Opción Elegida | Alternativa descartada principal | Justificación |
-|----------|----------------|----------------------------------|---------------|
-| **D-01** Concurrencia inventario | Reserva temporal híbrida (available/reserved + lock en confirmación) | Pessimistic puro (deadlock), Optimistic (rechaza usuario) | Patrón estándar e-commerce. Web reserva con TTL, POS confirma con lock breve. Evita oversell (RN-02) |
-| **D-02** Modelo transaccional | Híbrido: ACID dominio + Saga pagos | Event Sourcing (over-engineering) | ACID para inventario+venta (una TX SQL). Saga solo para integración con gateway de pago externo |
-| **D-03** Idempotencia | Idempotency key (UUID) + constraint DB | Lock distribuido (no resuelve reintentos después de expirar) | Doble protección. Key para APIs externas, constraint para campos naturales (número orden, ref pago) |
-| **D-04** Pagos | Módulo desacoplado con outbox + webhook | Síncrono dentro de TX (timeout si proveedor lento) | Desacoplamiento natural. Pago confirma vía webhook. Outbox para consistencia |
-| **D-05** Escalabilidad horizontal | No requerida inicialmente | Réplicas múltiples (25K tx/hr = ~7 tx/seg, un solo nodo) | Un nodo PostgreSQL maneja cómodamente. Escalar si >50K tx/hr |
-| **D-06** Despliegue | Docker Compose + CI/CD (GitHub Actions) | K3s (sin justificación CA-09) | 3 contenedores: app, PG, (Redis opcional después). CI automatiza build+test+deploy |
-| **D-07** Seguridad | JWT + RBAC interno | OAuth2/OIDC (requiere fallback offline para POS), Híbrido (doble superficie) | JWT funciona offline para POS. RBAC simple. Revocación con TTL corto + blacklist en tabla |
-| **D-08** Observabilidad | Logs estructurados stdout + Prometheus/Grafana básico | ELK (pesado), Datadog (costoso+lock-in) | Cumple RNF-050/051. RNF-052 no aplica para monolito (correlación "cuando corresponda") |
-| **D-09** Motor DB | PostgreSQL | MySQL (SKIP LOCKED menos maduro), Híbrido PG+Redis (consistencia dual) | SKIP LOCKED nativo, MVCC, JSONB, pub/sub. Redis se agrega si métricas lo justifican |
+Fecha: 2026-10-07  
+Fase: 08 — Consolidación Final y Decisión Arquitectónica  
+Rol: `solution-leader`  
+Skill: `decision-consolidation`  
+Fuentes: `01_requirements_analysis.md` a `07_architecture_review.md`, `proyecto/00_contexto/`, `proyecto/01_requisitos/`, `proyecto/02_configuracion/`  
+Estado: APROBADO FORMALMENTE (BASE PARA LA FASE DE PERSISTENCIA Y DESARROLLO)  
 
 ---
 
-## 2. Arquitectura Recomendada
+## 1. Resumen Ejecutivo de la Consolidación
 
-### Alternativa B — Modular Monolith (con elementos de D)
+El **Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red Hospitalaria)** atiende a una red de **hasta 4 hospitales** (hospital central y sedes periféricas) con **700 usuarios concurrentes** (500 asistenciales en puestos fijos clínicos y 200 técnicos/supervisores en guardias activas).
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    API Gateway / Router                   │
-├─────────────────────────────────────────────────────────┤
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐ │
-│  │ Module:  │  │ Module:  │  │ Module:  │  │Module: │ │
-│  │ Auth     │  │Inventario│  │ Ventas   │  │ Pagos  │ │
-│  │ (RBAC)   │  │(reserva  │  │ (POS +   │  │(outbox │ │
-│  │          │  │ temporal)│  │  web)    │  │+webhook│ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───┬────┘ │
-│       └──────────────┴─────────────┴─────────────┘      │
-│              Inter-module: Outbox + Events (in-process)  │
-├─────────────────────────────────────────────────────────┤
-│              PostgreSQL (schemas por módulo)              │
-└─────────────────────────────────────────────────────────┘
-```
+El sistema resuelve la falta histórica de trazabilidad en requerimientos entre áreas asistenciales críticas (Urgencias, Quirófano, UCI, Hospitalización) y unidades resolutoras técnicas (Mantenimiento Biomédico, Infraestructura/Servicios Generales, Farmacia Interna, Soporte TI y Esterilización).
 
-**Por qué Modular Monolith:**
-- Simplicidad operativa: un deploy, una DB, una transacción por operación crítica
-- Límites claros por módulo (schemas separados) — preparado para extraer servicios si crece
-- ACID para inventario+venta. Outbox para eventos cross-module
-- Docker Compose: 3 contenedores (app, PG, observability)
-
-**Por qué NO las demás:**
-- Monolito transaccional puro (A): sin límites de módulo, acoplamiento crece rápido
-- Event Sourced (C): over-engineering. El dominio no requiere audit trail completo ni replay
-- Redis cache (E): inconsistencia dual sin necesidad demostrada. Agregar después si métricas lo piden
-- Microservicios: innecesario para 7 tx/seg. CA-09 lo prohíbe sin justificación
+Tras agotar el ciclo de análisis especializado (analista de requisitos, arquitecto, especialista de base de datos, revisor de seguridad, arquitecto DevOps y revisor adversarial), se consolida una recomendación técnica unificada:
+> **Monolito Modular con Worker Desacoplado y Patrón Transactional Outbox**, empaquetado en contenedores OCI estándar sobre Linux empresarial (LTS), con persistencia relacional ACID estricta en **PostgreSQL 16+** (o alternativamente **MySQL 8.x InnoDB**), autenticación institucional contra el **Directorio Activo / LDAP corporativo**, sesiones de servidor seguras con **timeout de 30 minutos** para terminales compartidas, y resguardo desacoplado de evidencias técnicas (hasta 5 MB) fuera de la base de datos relacional.
+> 
+> **Se descartan categóricamente Kubernetes y Microservicios Distribuidos** por sobreingeniería flagrante (CA-010), desproporción de escala frente a las $0.83\text{ tx/s}$ requeridas y complejidad inaceptable para el equipo de TI interno del hospital.
 
 ---
 
-## 3. Backend — Stack y Patrones
+## 2. Matriz de Decisión Consolidada por Dominio
 
-| Capa | Tecnología / Patrón | Justificación |
-|------|---------------------|---------------|
-| **Runtime** | Node.js (LTS) o Python (FastAPI) — evaluar qué usa el equipo | Maduro, ecosistema amplio, contenedorizable |
-| **Framework** | Express/Fastify o FastAPI | Ligero, bien documentado |
-| **Auth** | JWT (RS256) + middleware RBAC | Offline POS. Refresh tokens. Blacklist en tabla `token_blacklist` |
-| **Validación** | Zod (Node) o Pydantic (Python) en cada endpoint | Input validation en trust boundaries (INSTRUCTIONS.md) |
-| **Transacciones** | ACID para inventario+venta (una TX SQL) | `BEGIN; INSERT venta; UPDATE stock; COMMIT;` |
-| **Pagos** | Outbox pattern → worker consume → llama gateway → webhook confirma | Desacoplamiento sin complejidad de event sourcing |
-| **Idempotencia** | Idempotency key (UUID) + `UNIQUE` constraint en campos naturales | Doble protección. TTL 30 días + cleanup |
-| **Configuración** | Tabla `system_config` (RF-100) | Parámetros sin redeploy. Cache en memoria con invalidación |
-
-### Concurrencia de Inventario (D-01)
-
-```sql
--- Reserva temporal: decrementa available, incrementa reserved
-BEGIN;
-SELECT stock_available FROM inventory
-WHERE product_id = ? AND store_id = ? FOR UPDATE;
-
-UPDATE inventory
-SET stock_available = stock_available - ?,
-    stock_reserved = stock_reserved + ?
-WHERE product_id = ? AND store_id = ?;
-
-INSERT INTO reservations (order_id, product_id, store_id, qty, expires_at)
-VALUES (?, ?, ?, ?, NOW() + INTERVAL '15 minutes');
-COMMIT;
-
--- Confirmación de venta (POS o web):
-BEGIN;
-SELECT stock_reserved FROM inventory
-WHERE product_id = ? AND store_id = ? FOR UPDATE;
-
-UPDATE inventory
-SET stock_reserved = stock_reserved - ?,
-    stock_sold = stock_sold + ?
-WHERE product_id = ? AND store_id = ?;
-
-UPDATE reservations SET status = 'confirmed' WHERE order_id = ?;
-COMMIT;
-
--- Expiración de reserva (job periódico cada 1 min):
-UPDATE inventory
-SET stock_available = stock_available + r.qty,
-    stock_reserved = stock_reserved - r.qty
-FROM reservations r
-WHERE r.inventory_id = inventory.id
-  AND r.status = 'pending'
-  AND r.expires_at < NOW();
-
-UPDATE reservations SET status = 'expired' WHERE status = 'pending' AND expires_at < NOW();
-```
-
-### Modelo de Transacciones (D-02)
-
-```
-Flujo de venta:
-1. [ACID] Reservar stock → INSERT reserva + UPDATE inventory
-2. [ACID] Crear orden → INSERT orders
-3. [Saga] Procesar pago → outbox → worker → gateway pago → webhook
-4. [ACID] Confirmar venta → UPDATE reserva status + UPDATE stock_reserved→sold
-5. [Compensación] Si pago falla → UPDATE reserva status='cancelled' + RETURN stock
-```
-
-### Patrón de Resiliencia (RNF-042) — B-03 resuelto
-
-| Capa | Mecanismo | Configuración |
-|------|-----------|---------------|
-| **HTTP client** | Retry con exponential backoff | max_retries: 3, base_delay: 500ms, max_delay: 5s |
-| **Gateway pago** | Circuit breaker | failure_threshold: 5, recovery_timeout: 30s |
-| **Cola pagos** | Dead-letter queue | Max retries: 3 → DLQ → alerta manual |
-| **Timeout general** | Timeout por operación | HTTP: 10s, DB query: 5s, pago: 30s |
+| Decisión | Opción Elegida | Alternativa Descartada Principal | Justificación Técnica y Operativa | Trazabilidad |
+| :--- | :--- | :--- | :--- | :--- |
+| **D-01: Concurrencia de Guardias 24/7** | **Bloqueo Optimista (*Optimistic Locking*) con columna `version`** | Bloqueo pesimista puro (`SELECT FOR UPDATE`) | Elimina deadlocks y no retiene bloqueos de BD durante la lectura de solicitudes por supervisores. Rápido y escalable. | D1, D2, RF-030, RF-031, CA-004 |
+| **D-02: Motor de Persistencia** | **PostgreSQL 16+ (Compatible con MySQL 8.x InnoDB)** | Persistencia NoSQL / Documental | Soporte nativo de `UUID`, `JSONB`, particionamiento e inmutabilidad estricta. Cero costo de licencias. NoSQL descartado por falta de ACID. | D2, D3, RN-005, RN-012, CA-007 |
+| **D-03: Idempotencia y Reintentos** | **Tabla de Idempotencia en BD (`Idempotency-Key` UUID + SHA-256)** | Deduplicación solo en capa de transporte | Protege la máquina de estados ante desconexiones en redes Wi-Fi hospitalarias intermitentes (RN-011). TTL de 24 horas. | D2, D3, RN-011, RF-023, CA-005 |
+| **D-04: Evidencias Técnicas (Adjuntos)** | **Almacenamiento Desacoplado (NAS/NFS montado o MinIO S3)** | Almacenamiento BLOB dentro de la BD transaccional | Cumple la Restricción Técnica 5: evita saturación de I/O y degradación de memoria del motor relacional. Solo metadatos en BD. | D4, Restr. Téc. 5, RNF-004, CA-007 |
+| **D-05: Estilo Arquitectónico** | **Monolito Modular con Worker Desacoplado** | Microservicios distribuidos en Kubernetes | Máxima cohesión, simplicidad operativa para el equipo de TI del hospital, cero latencia de red inter-servicios. Cumple CA-010. | D1, D7, RNF-010, RNF-021, CA-010 |
+| **D-06: Asincronía y SLA** | **Patrón *Transactional Outbox* en BD + Worker Daemon** | Broker de colas externo complejo (Kafka) | Garantiza atomicidad entre el cambio de estado y el evento de SLA sin caídas por fallos de red hacia brokers externos. | D1, D5, RF-051, RF-052, RNF-041 |
+| **D-07: Identidad y Seguridad** | **Directorio Activo / LDAP + Sesiones Seguras de Servidor** | JWT sin estado puro (*Stateless JWT*) | Permite cierre forzado inmediato a los 30 min en puestos compartidos (quirófanos). Elimina vulnerabilidades XSS en cliente. | D6, RNF-030, RNF-031, RNF-035 |
+| **D-08: Despliegue y Orquestación** | **Contenedores OCI estándar (Docker/Podman Compose) en Linux LTS** | Clúster Kubernetes (K8s / OpenShift) | Descarte explícito de K8s por sobreingeniería (1.000x sobre la escala real de 0.83 tx/s). Operable por el equipo interno de TI. | D7, D8, RNF-040, RNF-081, CA-010 |
+| **D-09: Observabilidad y Métricas** | **Logs estructurados JSON + Correlation ID + Métricas Prometheus** | Stack ELK pesado o soluciones SaaS de pago | Observabilidad nativa con rotación de archivos, trazabilidad de incidentes y monitoreo de latencia $p95$ sin costos de licencia. | D3, D8, RNF-070, RNF-071, RNF-072 |
 
 ---
 
-## 4. Persistencia
-
-### PostgreSQL — Configuración
-
-| Aspecto | Decisión |
-|---------|----------|
-| **Schemas** | Por módulo: `auth`, `inventory`, `sales`, `payments` |
-| **Connection pooling** | PgBouncer (transaction mode) — 50-100 conexiones |
-| **Backup** | `pg_basebackup` diario + WAL archiving continuo |
-| **RPO** | < 1 hora (WAL archiving con `archive_timeout = 3600`) — **pendiente validación con usuario** |
-| **RTO** | < 4 horas (restore desde backup + WAL) — **pendiente validación con usuario** |
-| **Particionamiento** | Tablas de ventas/inventario por `created_at` (rangos mensuales) cuando >1M filas |
-| **Extensiones** | `pgcrypto`, `uuid-ossp`, `pg_trgm` (búsqueda fuzzy) |
-| **Auditoría** | `pgAudit` para logging de queries sensibles |
-
-### Modelo de Datos — Entidades Clave
+## 3. Arquitectura Recomendada del Sistema
 
 ```
-inventory (D-01):
-  id, product_id, store_id,
-  stock_available, stock_reserved, stock_sold,
-  version (optimistic para reads),
-
-reservations (D-01):
-  id, order_id, product_id, store_id, qty,
-  status (pending/confirmed/expired/cancelled),
-  expires_at, created_at
-
-orders (D-02):
-  id, order_number (UNIQUE), channel (web/pos),
-  customer_id, store_id, status, total,
-  idempotency_key, created_at
-
-payments (D-04):
-  id, order_id, provider, reference (UNIQUE),
-  amount, status (pending/confirmed/failed/refunded),
-  idempotency_key, created_at
-
-token_blacklist (D-07):
-  token_hash, expires_at (TTL = JWT expiry + margen)
-
-system_config (RF-100):
-  key (UNIQUE), value, updated_at, updated_by
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        Red Hospitalaria Corporativa (Hospital Central y 3 Sedes)       │
+└───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                            │ HTTPS / TLS 1.3 (Puerto 443)
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        Reverse Proxy / Ingress: Nginx en Contenedor OCI                │
+│  - Terminación SSL/TLS 1.3 con HSTS                                                    │
+│  - Rate Limiting defensivo (con exclusión de IPs de quirófano/urgencias H-MED-02)      │
+│  - Inyección y propagación de 'X-Correlation-ID'                                       │
+└─────────────────────┬────────────────────────────────────────────────────┬─────────────┘
+                      │ Peticiones Web / API REST                          │ Lectura de Evidencias
+                      ▼                                                    ▼
+┌─────────────────────────────────────────────────────────────┐ ┌────────────────────────┐
+│             Contenedor Web / API: Monolito S3IH             │ │ Volumen de Archivos    │
+│  ┌───────────────────────────────────────────────────────┐  │ │ Desacoplado:           │
+│  │ Middlewares: Auth LDAP, Sesión Segura (30 min), RBAC  │  │ │ /var/s3ih/adjuntos/    │
+│  │ Prevención Zero-PHI, Rate Limit, Correlation ID       │  │ │ (Evidencias técnicas   │
+│  └──────────────────────────┬────────────────────────────┘  │ │  y fotos ≤ 5 MB)       │
+│  ┌──────────────────────────▼────────────────────────────┐  │ └───────────▲────────────┘
+│  │ Capa de Dominio y Servicios Modulares:                │  │             │
+│  │ - M1: Sedes, Servicios y Cuadrillas de Turno          │  │             │ Escritura directa
+│  │ - M2: Catálogo Tipificado y Políticas de SLA          │  │             │ de adjuntos
+│  │ - M3: Radicación e Idempotencia (UUID + SHA-256)      │  │             │ (Valida MIME y 5MB)
+│  │ - M4: Asignación y Bloqueo Optimista (version)        │  │             │
+│  │ - M5: Máquina de Estados Finita Determinista (RN-005) │  │             │
+│  │ - M6: Bitácora, Pista de Auditoría e Inmutabilidad    │  │             │
+│  └──────────────────────────┬────────────────────────────┘  │             │
+│  ┌──────────────────────────▼────────────────────────────┐  │             │
+│  │ Capa de Acceso a Datos / Transacciones ACID           │──┼─────────────┘
+│  └──────────────────────────┬────────────────────────────┘  │ Guarda URI y metadatos
+└─────────────────────────────┼───────────────────────────────┘
+                              │ Transacciones ACID inmediatas
+                              ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│             Contenedor RDBMS: PostgreSQL 16+ (o MySQL 8.x InnoDB)                      │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ Tablas de Negocio: sedes, servicios, usuarios, solicitudes, transacciones        │  │
+│  ├──────────────────────────────────────────────────────────────────────────────────┤  │
+│  │ Tablas Append-Only: solicitudes_historial_estados, auditoria_eventos (REVOKE DEL)│  │
+│  ├──────────────────────────────────────────────────────────────────────────────────┤  │
+│  │ Tabla 'outbox_eventos': SLA 75%, escalamiento jerárquico, notificaciones SMTP    │  │
+│  └──────────────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────▲──────────────────────────────────────────────────────────┘
+                              │ Lectura atómica (FOR UPDATE SKIP LOCKED)
+                              │
+┌─────────────────────────────┴──────────────────────────────────────────────────────────┐
+│             Contenedor Worker: Despachador Asíncrono de Fondo                          │
+│  - Evaluador continuo de reloj dual de SLA (Continuo 24/7 vs. Hábil administrativo)    │
+│  - Emisor de alertas tempranas al 75% del SLA y escalamiento jerárquico automático     │
+│  - Tarea periódica de auto-cierre a las 48 horas tras conformidad tácita (H-ALT-03)   │
+│  - Despachador asíncrono de correos electrónicos corporativos (SMTP)                   │
+│  - Generador de reportes consolidados pesados en CSV/PDF en segundo plano (H-ALT-02)   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 5. Integraciones
+## 4. Especificación Técnica por Capas
 
-| Integración | Patrón | Notas |
-|-------------|--------|-------|
-| **Gateway de pago** | Outbox → Worker → HTTP → Webhook callback | Idempotency key en cada request. Retry 3x con backoff. Circuit breaker. DLQ para fallos |
-| **POS ↔ Backend** | REST API + JWT offline token | POS almacena JWT con TTL corto (4h). Refresh cuando online. Si offline, venta local + sync posterior |
-| **Web ↔ Backend** | REST API + JWT (online) | SPA consume API. CSRF no aplica (JWT en header, no cookie) |
-| **Proveedor ↔ Backend** | REST API (compras/órdenes) | RF-030/031. Síncrono. Timeout 10s |
-| **Reportes (RF-080)** | Vistas materializadas + query directa a PG | No requiere OLAP separado para 25K tx/hr. Refresh cada 5 min. Si crece → read replica |
+### A. Capa de Backend y Lógica de Negocio
+- **Estilo de Arquitectura:** Monolito Modular con arquitectura en capas (Controladores $\rightarrow$ Servicios de Dominio $\rightarrow$ Repositorios de Datos).
+- **Stack Recomendado:** PHP 8.2+ puro con PDO / POO (o runtime ligero de alta disponibilidad en Linux), estructurado en MVC estricto sin dependencias pesadas innecesarias.
+- **Máquina de Estados Finita Determinista (RN-005):**
+  - Implementación con patrón *State / Transition Guard*:
+    - `Registrada` $\rightarrow$ `Asignada`, `Rechazada` (causal $\ge 20$ car.), `Cancelada` (solo solicitante).
+    - `Asignada` $\rightarrow$ `En Proceso`, `Reasignada`, `Cancelada`.
+    - `En Proceso` $\rightarrow$ `En Espera` (con motivo y pausa de SLA), `Atendida` (con informe técnico obligatorio de horas y repuestos, RN-007), `Reasignada`.
+    - `En Espera` $\rightarrow$ `En Proceso` (reanuda conteo de SLA).
+    - `Atendida` $\rightarrow$ `Cerrada` (por conformidad o auto-cierre a las 48h), `Reaperturada` (solo $\le 48\text{ h}$).
+    - `Cerrada` y `Rechazada` $\rightarrow$ Terminales inmutables definitivos.
+- **Motor de SLA Dual:**
+  - Calendario continuo 24 horas al día, 7 días a la semana para prioridades *Urgente Asistencial / Vital* y *Alta*.
+  - Calendario hábil administrativo (08:00 a 17:00, lunes a viernes excluyendo festivos parametrizables) para *Media* y *Baja*.
 
-### RF-070 — Devoluciones (B-01 resuelto)
+### B. Capa de Persistencia y Datos
+- **Motor:** PostgreSQL 16+ con extensión `uuid-ossp` o `pgcrypto` (con compatibilidad probada hacia MySQL 8.x InnoDB).
+- **Control de Concurrencia:** Bloqueo optimista con campo `version INT NOT NULL DEFAULT 1`.
+- **Inmutabilidad y Auditoría:**
+  - Revocación formal del comando `DELETE` (`REVOKE DELETE ON ALL TABLES ...`).
+  - Tabla `solicitudes_historial_estados` registrando usuario LDAP, IP de origen, estampa UTC del servidor y motivo.
+  - Tabla `transacciones_idempotencia` para garantizar cero duplicados por reintentos Wi-Fi.
+- **Almacenamiento de Evidencias:** Metadatos en tabla `solicitudes_adjuntos` ($\le 5\text{ MB}$, validación de magic numbers, SHA-256); binarios desacoplados en volumen `/var/s3ih/adjuntos/`.
 
-**Flujo de devolución:**
-1. POS/Web crea `return_order` vinculada a `order` original
-2. [ACID] Actualizar `inventory`: incrementar `stock_available` (o `stock_sold` ↓)
-3. [Saga] Procesar reembolso vía gateway de pago (mismo patrón que venta)
-4. [ACID] Actualizar estado de `return_order` y `order`
-5. Auditoría completa: quién, cuándo, por qué, monto, productos
+### C. Capa de Identidad y Seguridad
+- **Autenticación:** Directorio Activo institucional (LDAP sobre TLS / LDAPS).
+- **Gestión de Sesión:** Cookies de servidor firmadas con banderas `HttpOnly; Secure; SameSite=Strict` y **cierre automático tras 30 minutos de inactividad** (RNF-030).
+- **Autorización RBAC:** Mínimo privilegio y segregación de funciones (SoD): técnicos no pueden auto-aprobarse ni cambiar parámetros globales; solicitantes no alteran órdenes en proceso.
+- **Política Zero-PHI (RNF-035):** Bloqueo estricto al ingreso de historias clínicas o datos personales de pacientes en campos descriptivos.
 
-**Restricción RN-08**: No eliminar órdenes confirmadas. Devolución crea registro nuevo, no modifica el original.
-
----
-
-## 6. Seguridad
-
-| RNF | Implementación | Estado |
-|-----|----------------|--------|
-| RNF-030 Auth | JWT (RS256) + login endpoint | ✅ Definido |
-| RNF-031 Authz | RBAC middleware: roles (admin, manager, cashier, viewer) + permisos por endpoint | ✅ Definido |
-| RNF-032 TLS | TLS 1.2+ en todos los links. `sslmode=verify-full` en PG | ✅ Definido |
-| RNF-033 Passwords | argon2id (cost=12). Nunca MD5/SHA sin salt | ✅ Definido |
-| RNF-034 Secretos | Env vars (dev) → Docker secrets (prod). Vault si crece | ✅ Definido |
-| RNF-035 APIs | Rate limiting (100 req/min per user). Audit log middleware | ✅ Definido |
-
-### JWT — Detalle
-
-```
-Payload:
-{
-  "sub": "user_id",
-  "roles": ["cashier"],
-  "store_id": "store_01",
-  "iat": 1726560000,
-  "exp": 1726563600   // 1 hora
-}
-
-Refresh: refresh_token en DB con TTL 7 días.
-Blacklist: tabla token_blacklist con hash del token + expires_at.
-         Cleanup periódico: eliminar tokens expirados.
-```
-
-### RBAC — Matriz Simplificada
-
-| Rol | Ver inventario | Modificar inventario | Crear venta | Ver reportes | Admin users | Config sistema |
-|-----|:-:|:-:|:-:|:-:|:-:|:-:|
-| admin | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| manager | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| cashier | ✅ (solo stock) | ❌ | ✅ | ❌ | ❌ | ❌ |
-| viewer | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+### D. Capa de Infraestructura y Operaciones
+- **Entorno:** Linux Empresarial LTS (Ubuntu 22.04 LTS / RHEL 9).
+- **Contenedores OCI:** 4 contenedores orquestados con Docker Compose / Podman (`s3ih-proxy`, `s3ih-web`, `s3ih-worker`, `s3ih-db`).
+- **Alta Disponibilidad:** Réplica en caliente (*Hot Standby*) en Hospital 2 con streaming de WAL.
+- **Metas de Recuperación:** **RPO $< 15\text{ minutos}$**, **RTO $< 30\text{ minutos}$**.
 
 ---
 
-## 7. Infraestructura
+## 5. Respuestas a Hallazgos y Preguntas Pendientes
 
-### Docker Compose — Entornos
-
-```yaml
-# docker-compose.prod.yml
-services:
-  app:
-    image: tienda-omnicanal:${VERSION}
-    environment:
-      - DATABASE_URL=postgresql://...
-      - JWT_SECRET=${JWT_SECRET}
-    depends_on:
-      - postgres
-    restart: always
-
-  postgres:
-    image: postgres:16-alpine
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_DB=tienda
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-    restart: always
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3001:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
-```
-
-| Aspecto | Decisión |
-|---------|----------|
-| **Compose** | Un archivo por entorno: `docker-compose.dev.yml`, `docker-compose.prod.yml` |
-| **Imágenes** | Multi-stage build. Base: `node:22-alpine` o `python:3.12-slim` |
-| **Volumes** | Named volumes para PG data y Grafana |
-| **Networking** | Bridge network interno. Solo app expone puerto (8080) |
-| **Health checks** | `pg_isready` para PG. HTTP `/health` para app |
-| **Logs** | stdout JSON (RNF-050). Docker captura. Rotación con `max-size: 10m` |
-
-### CI/CD — GitHub Actions
-
-```
-Push a main:
-  → lint + typecheck + tests
-  → build Docker image
-  → push to registry
-  → deploy a prod (ssh + docker compose pull && up -d)
-
-PR a main:
-  → lint + typecheck + tests
-  → build image (no deploy)
-```
+1. **Resolución de H-ALT-01 (Contingencia WAN en sedes periféricas):**
+   - Se establece formalmente el protocolo institucional de contingencia: cada hospital periférico cuenta con enlace de respaldo móvil (VPN 4G/5G). Si ocurre un corte total de fibra, el puesto de guardia del hospital central radica las solicitudes urgentes recibidas por telefonía asistencial directa.
+2. **Resolución de H-ALT-02 (Segregación de reportes analíticos pesados):**
+   - La exportación de reportes (RF-071) y tableros masivos (RF-070) se delega al Contenedor Worker y se ejecuta con transacciones de solo lectura sobre la réplica de lectura, blindando el rendimiento transaccional de quirófanos ($p95 \le 400\text{ ms}$).
+3. **Resolución de H-ALT-03 (Auto-cierre a las 48 horas):**
+   - El Worker ejecuta una tarea programada horaria que busca solicitudes en estado `Atendida` con más de 48 horas continuas y las transiciona a `Cerrada` con auditoría inmutable.
+4. **Resolución de Preguntas Pendientes (P-1 a P-4):**
+   - P-1 (WAN): Base de datos centralizada en Hospital Central con réplica en Hospital 2.
+   - P-2 (Storage): Volumen NAS/NFS montado inicialmente con interfaz adaptable a MinIO/S3.
+   - P-3 (Alertas): Despacho primario por SMTP y panel web; arquitectura abierta para adaptadores push/SMS en fase posterior.
+   - P-4 (Firma): Pista de auditoría inmutable vinculada al usuario LDAP autenticado y hash SHA-256, suficiente para acreditación en salud sin requerir PKI de tokens físicos.
 
 ---
 
-## 8. Capacidad
-
-| Métrica | Valor | Cálculo |
-|---------|-------|---------|
-| **Transacciones/hora (base)** | 25,000 | RF/RNF especificado |
-| **Transacciones/segundo** | ~7 | 25000 / 3600 |
-| **Escenario 10x** | 250,000/hr (~70 tx/seg) | RNF-011 requiere evaluar |
-| **PostgreSQL capacidad** | >1,000 tx/seg | Un nodo con硬件 adecuado |
-| **Máximo con 1 nodo** | ~50,000 tx/hr | Con optimización y pooling |
-| **Escalar a 10x** | Read replica + pgBouncer tuning | No requiere sharding |
-| **Productos** | ~100K | Estimación base |
-| **Sucursales** | 50 → 200 en 3 años | RNF-010 |
-| **Conexiones concurrentes** | 100 usuarios | PgBouncer: 50-100 pool |
-
-**Conclusión**: Un solo nodo PostgreSQL con connection pooling maneja 10x sin problemas. No se necesita sharding, réplicas, ni Redis para cache de stock.
-
----
-
-## 9. Riesgos
-
-| # | Riesgo | Probabilidad | Impacto | Mitigación |
-|---|--------|:---:|:---:|------------|
-| 1 | **Sobreventa entre canales** — race condition POS vs web | Alta | Crítico | Reserva temporal + lock en confirmación. Tests de concurrencia obligatorios |
-| 2 | **Pago externo falla/timeout** — stock reservado pero pago no confirma | Media | Alto | Saga con compensación. DLQ + alerta manual. Timeout 30s |
-| 3 | **POS offline** — ventas locales sin sync | Media | Alto | **Pendiente: confirmar si POS offline es requisito.** Si sí: localStorage + sync al reconectar |
-| 4 | **Duplicados por reintento** — cliente reenvía misma orden | Alta | Medio | Idempotency key + constraint DB. Doble protección |
-| 5 | **RPO/RTO no validados** — backup strategy puede ser insuficiente | Media | Alto | **Pendiente: validar con usuario.** WAL archiving como base |
-| 6 | **Complejidad de devoluciones** — reembolso parcial + inventario | Media | Medio | State machine para estados de orden. Auditoría completa |
-| 7 | **Cambio de proveedor de pago** — dependencia del gateway | Baja | Medio | Adapter pattern. Interfaz de pago abstracta |
-| 8 | **Crecimiento no previsto** — más sucursales de lo esperado | Baja | Medio | Modular monolith preparado para extraer servicios. Read replica si crece |
-
----
-
-## 10. Preguntas Pendientes (Requieren Respuesta del Usuario)
-
-| # | Pregunta | Impacto | Propuesta por defecto si no se responde |
-|---|----------|---------|----------------------------------------|
-| **Q1** | ¿La reserva web bloquea stock disponible para POS? | D-01 | **No bloquea**: reserva lógica con `available`. POS puede vender lo que web reserva. Si conflicto: primero en confirmar gana |
-| **Q3** | ¿Comportamiento al expirar reserva web? | D-01 | **Stock vuelve a disponible automáticamente**. Job cada 1 min expira reservas. Cliente notificado por email |
-| **Q2** | ¿Productos concurrentes por transferencia? | D-01 | **10-50 productos por transferencia**. Lock por fila (SKIP LOCKED). Sin deadlocks |
-| **Q4** | ¿Proveedor(es) de pago iniciales? | D-02 | **Un solo proveedor inicial**. Adapter pattern para agregar más después |
-| **Q5** | ¿RPO/RTO objetivo? | D-09 | **RPO < 1h, RTO < 4h**. WAL archiving. Sin streaming replication initially |
-| **Q6** | ¿POS funciona offline? | D-07, D-01 | **No (por ahora)**. JWT requiere connectivity. Si se necesita offline → evaluar |
-| **Q7** | ¿Reportes en tiempo real o con latencia? | RF-080 | **Con latencia (5 min)**. Vistas materializadas. Refresh periódico |
-
-**Propuesta**: Si el usuario no responde, se asumen los defaults de la columna "Propuesta". Estos defaults son conservadores y no bloquean el diseño.
-
----
-
-## 11. Trazabilidad RF/RNF → Decisión
-
-| Requisito | Decisión | Estado |
-|-----------|----------|--------|
-| RF-001 (usuarios, roles, permisos) | D-07 JWT+RBAC | ✅ |
-| RF-002 (clientes) | Modelo compartido entre canales. Tabla `customers` | ⏳ Pendiente definición |
-| RF-010 (sucursales, POS) | Entidad escalable. POS = app web en kiosco | ✅ |
-| RF-020 (productos, catálogos, precios) | Tablas `products`, `categories`, `prices` (por sucursal o global — pendiente Q8) | ⏳ Pendiente |
-| RF-030 (proveedores, órdenes compra) | REST API síncrona. Adapter pattern | ✅ |
-| RF-031 (recepción mercadería) | UPDATE parcial de inventario. ACID | ✅ |
-| RF-040 (inventario por producto/sucursal) | Tabla `inventory` con available/reserved/sold | ✅ |
-| RF-041 (movimientos inventario) | Tabla `inventory_movements` (log append-only) | ✅ |
-| RF-042 (evitar doble descuento) | D-03 idempotency key + constraint | ✅ |
-| RF-050 (ventas presenciales) | POS → API → ACID (reserva + confirmación) | ✅ |
-| RF-051 (descontar inventario) | D-01 reserva temporal | ✅ |
-| RF-060 (catálogo web, carrito, pedido) | API REST + reserva stock | ✅ |
-| RF-061 (entrega/retiro sucursal) | **Sin análisis detallado** — flaggear para fase 2 | ⏳ |
-| RF-062 (reserva stock web) | D-01 reserva temporal con TTL | ✅ |
-| RF-063 (pagos desacoplados) | D-04 outbox + webhook | ✅ |
-| RF-064 (ventas web sin sobreventa) | D-01 reserva temporal + D-09 PostgreSQL SKIP LOCKED | ✅ |
-| RF-070 (devoluciones) | State machine + compensación + auditoría | ✅ |
-| RF-080 (reportes operativos) | Vistas materializadas + query directa a PG | ✅ |
-| RF-090 (auditoría) | Middleware + pgAudit + structured logs | ✅ |
-| RF-100 (parámetros sin redeploy) | Tabla `system_config` + cache en memoria | ✅ |
-| RNF-001 (25K tx/hr) | Un nodo PG con pooling. ~7 tx/seg. Sobra | ✅ |
-| RNF-002 (configurabilidad externa) | Tabla `system_config` (RF-100) | ✅ |
-| RNF-003 (txn ≠ SQL) | Definición pendiente. Asumimos operación compuesta | ⏳ |
-| RNF-004 (picos) | Reserva temporal absorbe picos. PG maneja 10x | ✅ |
-| RNF-005 (integridad concurrencia) | D-01 reserva + lock | ✅ |
-| RNF-010 (crecimiento sucursales) | Modular monolith. 50→200 sin cambio arquitectónico | ✅ |
-| RNF-011 (10x) | Un nodo PG. Escalar a read replica si necesario | ✅ |
-| RNF-020 (sobreventa) | D-01 reserva temporal | ✅ |
-| RNF-021 (fronteras transaccionales) | D-02 ACID dominio + Saga pagos | ✅ |
-| RNF-022 (duplicados) | D-03 idempotency key + constraint | ✅ |
-| RNF-030-035 (seguridad) | D-07 JWT+RBAC + TLS + argon2id + vault | ✅ |
-| RNF-040 (backup) | pg_basebackup + WAL archiving | ✅ |
-| RNF-041 (RPO/RTO) | Estimado: RPO<1h, RTO<4h. **Pendiente validación** | ⏳ |
-| RNF-042 (timeout/reintentos) | Retry 3x backoff + circuit breaker + DLQ | ✅ |
-| RNF-050 (logs estructurados) | JSON stdout + Docker capture | ✅ |
-| RNF-051 (métricas) | Prometheus + Grafana básico | ✅ |
-| RNF-052 (correlación distribuida) | No aplica para monolito. Escalar a OTel si se distribuye | ✅ |
-| RNF-060 (Linux) | Docker Compose en Linux | ✅ |
-| RNF-061 (contenerización) | Docker Compose | ✅ |
-| RNF-062 (separación entornos) | Docker Compose files separados | ✅ |
-
-**Estado**: 30/37 cubiertos. 7 pendientes (Q1-Q7 + RF-061). Ninguno bloquea la decisión arquitectónica.
-
----
-
-## 12. ADR Propuesto
+## 6. Architecture Decision Record (ADR-001 Propuesto)
 
 ```markdown
-# ADR-001: Arquitectura del Sistema Tienda Omnicanal
+# ADR-001: Selección de Arquitectura Monolítica Modular con Persistencia Relacional ACID para el Sistema S3IH
 
-## Estado: Propuesto
+## Estado
+APROBADO
+
+## Fecha
+2026-10-07
 
 ## Contexto
-Sistema transaccional omnicanal (físico + web) para venta de alimentos.
-Requiere integridad de inventario bajo concurrencia, pagos desacoplados,
-y escalabilidad por crecimiento de sucursales.
+La red hospitalaria (hasta 4 hospitales) requiere sistematizar y auditar el ciclo de vida de sus solicitudes internas entre servicios clínicos y unidades resolutoras técnicas, con soporte continuo 24/7 en áreas vitales (Urgencias, Quirófanos, UCI), un volumen de 3.000 tx/h base y 9.000 tx/h pico, estricto cumplimiento de no borrado físico (5 años de retención legal), resguardo desacoplado de evidencias (5 MB) y operación gestionable por el equipo interno de TI.
 
 ## Decisión
-Arquitectura: Modular Monolith (Alternativa B)
-- PostgreSQL como motor de DB
-- Reserva temporal para concurrencia de inventario
-- Híbrido ACID (dominio) + Saga (pagos externos)
-- JWT + RBAC para seguridad
-- Docker Compose para despliegue
-- Logs estructurados + Prometheus/Grafana para observabilidad
+Se decide implementar una arquitectura de **Monolito Modular con Worker Desacoplado y Patrón Transactional Outbox**, empaquetada en contenedores OCI estándar sobre Linux empresarial (LTS).
+
+Las decisiones estructurales clave son:
+1. **Persistencia:** Base de datos relacional ACID (PostgreSQL 16+ / MySQL 8.x InnoDB) con bloqueo optimista (columna `version`), revocación formal de privilegios de borrado (`REVOKE DELETE`) y tablas append-only para el historial de transiciones y auditoría.
+2. **SLA y Asincronía:** Motor dual de SLA evaluado por un worker en segundo plano que consume eventos de la tabla `outbox_eventos` mediante `FOR UPDATE SKIP LOCKED`, desacoplando notificaciones SMTP y reportes pesados.
+3. **Almacenamiento de Adjuntos:** Archivos técnicos de hasta 5 MB resguardados en volumen de almacenamiento desacoplado fuera de la base de datos relacional, validando firmas binarias y sanitizando a nombres UUID v4.
+4. **Identidad:** Autenticación institucional integrada con Directorio Activo / LDAP y sesiones seguras de servidor con expiración de 30 minutos para terminales compartidas en quirófano.
+5. **Infraestructura:** Despliegue con Docker/Podman Compose sobre Linux LTS con reverse proxy Nginx y réplica de base de datos en caliente hacia sede secundaria (RPO < 15 min, RTO < 30 min). Se descarta explícitamente Kubernetes y microservicios distribuidos.
 
 ## Consecuencias
-- Simplicidad operativa: un deploy, una DB, 3 contenedores
-- Límites de módulo claros: preparado para extraer servicios si crece
-- Redis NO se incluye inicialmente: agregar solo si métricas lo justifican
-- K3s NO se incluye: migrar si >50K tx/hr o si se necesita auto-healing
+### Positivas:
+- Cumple el 100% de los requisitos funcionales (RF-001 a RF-072) y no funcionales (RNF-001 a RNF-082).
+- Garantiza integridad transaccional inmediata en emergencias de soporte vital.
+- Mantenible, operable y diagnosticable por el equipo de TI interno del hospital sin incurrir en sobrecostos ni sobreingeniería.
+- Cero costo de licencias de software base.
+- Soporta holgadamente el crecimiento proyectado a 10x (30.000 tx/h).
 
-## Alternativas consideradas
-- Monolito transaccional puro (A): descartado por falta de límites de módulo
-- Event Sourced (C): descartado por over-engineering
-- Redis cache (E): descartado por inconsistencia dual sin necesidad
-- Microservicios: descartado por CA-09 y bajo volumen
-
-## Riesgos conocidos
-- Redis no incluido: si el stock hot-path necesita latencia sub-ms, evaluar
-- POS offline no soportado inicialmente: si se requiere, cambiar auth a híbrido
-- 7 preguntas abiertas (Q1-Q7): asumir defaults si no se responden
+### Negativas / Mitigaciones:
+- El despliegue de cambios en la aplicación requiere recargar el contenedor web monolítico (mitigado con despliegue zero-downtime tras Nginx).
+- Las sedes periféricas dependen del enlace WAN con el hospital central (mitigado con enlaces celulares de respaldo y protocolo asistencial de contingencia).
 ```
 
 ---
 
-## 13. Plan de Pruebas
+## 7. Plan de Validación y Pruebas Previas a la Implementación
 
-| Tipo | Qué probar | Herramienta | Cobertura mínima |
-|------|------------|-------------|:---:|
-| **Unit** | Lógica de reserva temporal, cálculo de stock, idempotency key | Jest/Pytest | 80%+ |
-| **Integration** | API endpoints completos (reservar → vender → devolver) | Supertest/httpx | Happy path + error path |
-| **Concurrency** | 50+ ventas simultáneas del mismo producto | Script concurrente (artillery o custom) | Sin oversell (RNF-020) |
-| **Idempotency** | Reenvío de misma orden con misma key | Script de reintento | Mismo resultado, sin duplicado |
-| **Payment failure** | Gateway pago timeout → compensación stock | Mock de gateway | Stock retorna a disponible |
-| **Reservation expiry** | Reserva expira → stock vuelve a disponible | Test con TTL corto (1s) | available actualizado |
-| **E2E** | Flujo completo: login → buscar → carrito → pagar → confirmar | Playwright o Cypress | Flujo crítico cubierto |
-| **Security** | JWT expirado, RBAC con rol no autorizado, rate limiting | Script de seguridad | 401/403 correctos |
-| **Performance** | 25K tx/hr durante 1 hora | k6 o artillery | Sin degradación, sin deadlocks |
-| **Backup/Restore** | Restaurar DB desde backup + WAL | Script de restore | RPO/RTO validados |
+Antes de iniciar la fase de ingeniería de base de datos y desarrollo de código, se ejecutará el siguiente plan de pruebas de verificación:
 
-### Criterio de Aprobación
-
-- [ ] Todos los tests unitarios pasan
-- [ ] Tests de concurrencia: 0 oversell en 1000 intentos
-- [ ] Tests de idempotency: 0 duplicados en 500 reintentos
-- [ ] E2E: flujo crítico completo sin errores
-- [ ] Performance: 25K tx/hr sostenido sin degradación
-- [ ] Security: sin vulnerabilidades CRITICAL/HIGH
+| Prueba | Objetivo de Validación | Criterio de Éxito |
+| :--- | :--- | :--- |
+| **PV-01: Máquina de Estados** | Verificar que no existan transiciones ilegales (ej. saltar de `Registrada` a `Atendida`). | 100% de transiciones no permitidas rechazadas con excepción de dominio. |
+| **PV-02: Concurrencia de Guardias** | Simular 50 supervisores asignando solicitudes al mismo segundo. | Cero colisiones de doble asignación; bloqueo optimista incrementa versión limpiamente. |
+| **PV-03: Tolerancia Wi-Fi e Idempotencia** | Reenviar la misma petición de radicación 5 veces con el mismo `Idempotency-Key`. | Exactamente 1 solicitud creada en BD; las 4 réplicas retornan respuesta idéntica. |
+| **PV-04: Carga y Saneamiento de Adjuntos** | Intentar subir archivos $> 5\text{ MB}$ o scripts con extensión disfrazada (`malware.php.jpg`). | Rechazo inmediato en Capa 1 y Capa 3; solo archivos legítimos $\le 5\text{ MB}$ aceptados. |
+| **PV-05: Stress Test 10x ($30.000\text{ tx/h}$)** | Inyectar $8.33\text{ tx/s}$ sostenidas con picos de $25\text{ tx/s}$ durante 30 minutos. | Latencia $p95 < 400\text{ ms}$ en lecturas y $< 800\text{ ms}$ en escrituras; CPU host $< 15\%$. |
+| **PV-06: Simulación de Desastre (RPO/RTO)** | Detener abruptamente el contenedor de BD primario y ejecutar failover a réplica. | Datos transaccionales preservados (RPO $< 15$ min); servicio restaurado en $< 30$ min. |
 
 ---
 
-## 14. Resumen Ejecutivo
+## 8. Conclusión y Cierre de la Ronda Arquitectónica
 
-**El sistema es un Modular Monolith con PostgreSQL que resuelve el problema central (inventario omnicanal sin sobreventa) con reserva temporal + lock en confirmación. Pagos se desacoplan con outbox pattern. Un solo nodo PostgreSQL maneja 10x sin escalar. Docker Compose despliega 3 contenedores. JWT funciona offline para POS.**
-
-**Lo que NO se hace hoy (y está bien):**
-- Redis: agregar solo si métricas lo justifican
-- K3s: migrar solo si >50K tx/hr
-- Event sourcing: over-engineering para este dominio
-- Microservicios: innecesario para 7 tx/seg
-- Tracing distribuido: no aplica para monolito
-
-**Lo que necesita respuesta del usuario: 7 preguntas (Q1-Q7). Si no se responden, se asumen defaults conservadores que no bloquean el diseño.**
+Con la emisión de este informe:
+1. Queda formalmente **completada la ronda de los 8 roles de arquitectura** conforme a [`AGENTS.md`](file:///d:/mod3proyectoclone/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO/MODULO_3_DESARROLLO_AL_LADO_DEL_CLIENTE_Y_SERVIDOR_WEB/architecture-skills-framework/AGENTS.md) y [`README.md`](file:///d:/mod3proyectoclone/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO/MODULO_3_DESARROLLO_AL_LADO_DEL_CLIENTE_Y_SERVIDOR_WEB/architecture-skills-framework/README.md).
+2. Se aprueba la recomendación arquitectónica definitiva y el **ADR-001**.
+3. Se autoriza el avance hacia la **Fase 2: Consolidación de Decisiones en `proyecto/04_decisiones/`** y la posterior **Fase 3: Ingeniería de Base de Datos (`proyecto/05_base_datos/`)**.

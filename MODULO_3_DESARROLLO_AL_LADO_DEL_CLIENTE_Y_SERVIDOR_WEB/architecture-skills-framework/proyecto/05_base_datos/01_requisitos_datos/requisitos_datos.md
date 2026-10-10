@@ -1,150 +1,189 @@
-# Paso 01 — Lectura y trazabilidad de requisitos de datos
+# Paso 01 — Lectura y Trazabilidad de Requisitos de Datos
 
-**Workflow:** 02_database_workflow — Ingeniería de base de datos
-**Skill utilizado:** `database-schema-designer` (instalado en `.agents/skills/`)
-**Proyecto:** Sistema Tienda Omnicanal de Alimentos
-**Fecha:** 2026-09-22
-**Restricción de este paso:** no se crea SQL. Solo trazabilidad requisitos → modelo futuro.
+**Workflow:** `02_database_workflow` — Ingeniería de base de datos  
+**Skill utilizado:** `database-schema-designer` (instalado en `.agents/skills/`)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red Hospitalaria)  
+**Fecha:** 2026-10-07  
+**Restricción obligatoria de esta fase:** No crear SQL todavía. Establecer exclusivamente la trazabilidad formal Requisitos $\rightarrow$ Necesidades de Persistencia y Modelo de Datos.  
 
-## 1. Fuentes leídas
+---
 
-| Fuente | Archivos |
-|---|---|
-| Contexto | `00_contexto/descripcion.md`, `alcance.md`, `reglas_negocio.md`, `restricciones.md` |
-| Requisitos | `01_requisitos/RF.md`, `RNF.md`, `criterios_aceptacion.md` |
-| Configuración | `02_configuracion/perfil_carga.yaml` |
-| Resultados previos | `03_resultados/04_database_analysis.md`, `08_recomendacion_final.md` |
-| Decisiones | `04_decisiones/decisiones_base_datos.md` (lectura obligatoria previa) |
+## 1. Fuentes Consultadas y Regla de Verdad
 
-## 2. Regla de resolución de conflictos
+| Dimensión | Archivos de Entrada Vinculantes |
+| :--- | :--- |
+| **Contexto y Alcance** | `proyecto/00_contexto/descripcion.md`, `alcance.md`, `reglas_negocio.md`, `restricciones.md` |
+| **Requisitos Formales** | `proyecto/01_requisitos/RF.md`, `RNF.md`, `criterios_aceptacion.md` |
+| **Configuración Operativa** | `proyecto/02_configuracion/perfil_carga.yaml` |
+| **Resultados de Arquitectura** | `proyecto/03_resultados/04_database_analysis.md`, `08_recomendacion_final.md` |
+| **Decisiones Vigentes** | `proyecto/04_decisiones/decisiones_base_datos.md`, `decisiones_alcance.md`, `decisiones_api.md` |
 
-- Toda decisión con estado **APROBADO** en `decisiones_base_datos.md` es vinculante.
-- Si `08_recomendacion_final.md` y `decisiones_base_datos.md` difieren (p. ej. mención de PostgreSQL frente a MySQL 8.x APROBADO), prevalece `decisiones_base_datos.md` para la fase de base de datos.
-- Las decisiones **PENDIENTE** (DB-P01…DB-P12) se modelan como parámetros configurables; no se inventan respuestas.
+### Regla de Resolución de Conflictos:
+- Las decisiones consolidadas en [`decisiones_base_datos.md`](file:///d:/mod3proyectoclone/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO/MODULO_3_DESARROLLO_AL_LADO_DEL_CLIENTE_Y_SERVIDOR_WEB/architecture-skills-framework/proyecto/04_decisiones/decisiones_base_datos.md) y en el **ADR-001** (`08_recomendacion_final.md`) son de cumplimiento obligatorio:
+  1. Base de datos relacional transaccional ACID (**PostgreSQL 16+** como motor recomendado / **MySQL 8.x InnoDB** como opción compatible).
+  2. Control de concurrencia optimista con columna `version INT NOT NULL DEFAULT 1`.
+  3. Prohibición absoluta de borrado físico (`REVOKE DELETE` general y tablas append-only para auditoría e historial de estados).
+  4. Patrón *Transactional Outbox* para el desacoplamiento asíncrono de eventos de SLA y notificaciones.
+  5. Desacoplamiento total de evidencias técnicas (hasta 5 MB) fuera de la base de datos relacional (prohibición de tipos BLOB en tablas operativas).
 
-## 3. Inventario de requisitos → necesidades de datos
+---
 
-### 3.1 Trazabilidad RF → entidades/estructuras del modelo
+## 2. Inventario de Requisitos Funcionales $\rightarrow$ Entidades y Estructuras de Datos
 
-| RF | Descripción | Entidades / estructuras derivadas |
-|---|---|---|
-| RF-001 | Usuarios, roles y permisos | `auth_users`, `auth_roles`, `auth_permissions`, relación usuario↔rol↔permiso |
-| RF-002 | Administrar clientes | `customers` (modelo definido bajo DB-P08) |
-| RF-010 | Sucursales y cajas/POS | `stores`, `pos_registers` |
-| RF-020 | Productos, categorías, precios, promociones | `products`, `categories`, `prices`, `promotions` (alcance de precios bajo DB-P09) |
-| RF-030 | Proveedores y órdenes de compra | `suppliers`, `purchase_orders`, `purchase_order_items` |
-| RF-031 | Recepción parcial/total de mercadería | `purchase_receptions`, `purchase_reception_items` (RN-05) |
-| RF-040 | Inventario por producto y sucursal | `inventory` (product_id, store_id, stock_available, stock_reserved, stock_sold, version) |
-| RF-041 | Entradas, salidas, reservas, ajustes, transferencias | `inventory_movements` (append-only), `inventory_reservations`, `stock_adjustments`, `store_transfers`, `store_transfer_items` |
-| RF-042 | Evitar doble descuento ante reintentos | `idempotency_keys` + UNIQUE (order_number, payment_reference) |
-| RF-050 | Ventas presenciales y pagos | `sales_orders`, `sales_order_items`, `payments_transactions` |
-| RF-051 | Descontar inventario al confirmar venta | movimiento en `inventory_movements` dentro de la misma transacción |
-| RF-060 | Catálogo, carrito y pedido web | `sales_orders` con `channel = web`, `web_carts`/`web_cart_items` (carrito; ver §6) |
-| RF-061 | Entrega o retiro en sucursal | `sales_orders.fulfillment_type`, dirección/fecha (detalles bajo DB-P10) |
-| RF-062 | Validar/reservar stock antes de confirmar | `inventory_reservations` (status, expires_at; RN-03) |
-| RF-063 | Pagos con interfaz desacoplada | `payments_transactions` + `outbox_events` (patrón Outbox APROBADO) |
-| RF-064 | Sin sobreventa web vs físico | `inventory` con available/reserved + lock (D-01) |
-| RF-070 | Devoluciones parciales/totales | `return_orders`, `return_order_items` (nueva transacción ligada a orden original; RN-08) |
-| RF-080 | Reportes operativos | consultas sobre OLTP + estrategia de agregados/vistas (§ Decisión 13, con condición) |
-| RF-090 | Auditar operaciones críticas | `audit_log` (+ triggers), `inventory_movements`, campos de auditoría obligatorios |
-| RF-100 | Parámetros operativos sin redeploy | `system_config` (key, value, updated_at, updated_by) |
+### 2.1 Módulo 1: Identidad, Sedes y Servicios Hospitalarios
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-001** | Administrar estructura multisede de hasta 4 hospitales | `sedes` (`id`, `codigo_institucional CHAR(2)`, `nombre`, `direccion`, `telefono`, `es_central BOOLEAN`, `estado`). |
+| **RF-002** | Catálogo de servicios y ubicaciones clínicas/técnicas por sede | `servicios` (`id`, `sede_id`, `codigo`, `nombre`, `tipo_servicio ENUM('ASISTENCIAL','RESOLUTOR')`, `ubicacion_piso_area`, `estado`). |
+| **RF-003** | Usuarios, roles y asignación bajo mínimo privilegio (RBAC) | `usuarios` (`id`, `username`, `email`, `nombre_completo`, `sede_id`, `servicio_id`, `rol_codigo`, `estado`), `roles` (`codigo`, `nombre`, `permisos JSONB`). |
+| **RF-004** | Cuadrillas técnicas, equipos de guardia y turnos activos | `cuadrillas_guardia` (`id`, `sede_id`, `servicio_resolutor_id`, `nombre`, `turno_codigo`, `estado`), `cuadrilla_miembros` (`cuadrilla_id`, `usuario_id`). |
 
-### 3.2 Trazabilidad RNF → propiedades exigidas al modelo
+### 2.2 Módulo 2: Catálogo de Solicitudes y Acuerdos de Nivel de Servicio (SLA)
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-010** | Catálogo tipificado de solicitudes internas por especialidad | `solicitudes_tipos` (`id`, `servicio_resolutor_id`, `codigo_tipo`, `nombre`, `descripcion`, `prioridad_sugerida`, `estado`). |
+| **RF-011 / RF-012** | Prioridades asistenciales y tiempos límite SLA (MTTA y MTTR) | `sla_politicas` (`id`, `tipo_solicitud_id`, `prioridad_asistencial ENUM('VITAL','ALTA','MEDIA','BAJA')`, `tiempo_max_respuesta_mtta_min`, `tiempo_max_resolucion_mttr_min`). |
+| **RF-013** | Calendarios operativos diferenciados (Continuo 24/7 vs. Hábil) | `sla_calendarios` (`codigo_calendario ENUM('CONTINUO_24_7','HABIL_ADMINISTRATIVO')`, `hora_inicio TIME`, `hora_fin TIME`, `dias_laborales_semana INT[]`), `dias_inhabiles_feriados` (`fecha DATE`, `sede_id NULL`). |
+| **RF-014** | Causales estandarizadas de suspensión, rechazo y reapertura | `causales_catalogo` (`codigo`, `tipo_causal ENUM('SUSPENSION_ESPERA','RECHAZO_TECNICO','CANCELACION_USUARIO','REAPERTURA')`, `descripcion`, `estado`). |
 
-| RNF | Exigencia sobre datos | Respuesta prevista en fases siguientes |
-|---|---|---|
-| RNF-001 | 25.000 tx/hora | dimensionado de tipos, índices (Paso 11), pooling (§19) |
-| RNF-002 | Capacidad configurable externamente | `system_config` |
-| RNF-003/004 | tx ≠ sentencia SQL; picos ×3.0 | supuestos de carga en diseño físico y pruebas |
-| RNF-005 | Integridad bajo concurrencia POS+web | locks de fila, available/reserved (Paso 12) |
-| RNF-010/011 | Crecer sucursales/cajas sin rediseño; evaluar 10x | claves FK por sucursal, sin hardcodeo de tiendas |
-| RNF-020 | Sin sobreventa | D-01 + CHECK/locks (Paso 08/12) |
-| RNF-021 | Fronteras transaccionales dinero/inventario | ACID interno + Saga pagos (D-02) |
-| RNF-022 | Sin duplicados ante reintentos | idempotency_keys + UNIQUE (D-03) |
-| RNF-030…035 | Authz mínimo privilegio, TLS, hashes, secretos fuera de repo | Paso 09 seguridad; Argon2id (§15) |
-| RNF-040/041 | Backup/restauración; RPO/RTO antes de producción | Paso 07/09; RPO/RTO aún `null` en perfil_carga (DB-P05) |
-| RNF-042 | Timeouts/reintentos ante dependencias externas | Outbox + estados de pago (§16) |
-| RNF-050…052 | Logs estructurados, métricas, correlación | audit_log, outbox con correlation_id (Paso 10) |
-| RNF-060…062 | Linux, contenerizable, config separada por entorno | MySQL 8.x; `.env`/Docker Secrets (§14) |
+### 2.3 Módulo 3: Radicación y Registro de Solicitudes
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-020** | Radicación formal con código correlativo inmutable (`H1-2026-XXXXXX`) | `solicitudes` (`id`, `codigo_correlativo VARCHAR(20) UNIQUE`, `sede_id`, `servicio_origen_id`, `servicio_resolutor_id`, `tipo_solicitud_id`, `ubicacion_especifica`, `prioridad_asistencial`, `descripcion_falla`, `estado`, `created_at`). |
+| **RF-021** | Formulario expedito para emergencias de soporte vital | Soportado en `solicitudes` con bandera `es_expedita BOOLEAN DEFAULT FALSE` y validación de campos obligatorios mínimos (RN-002). |
+| **RF-022** | Adjuntos y evidencias técnicas ($\le 5\text{ MB}$, máx. 5 archivos) | `solicitudes_adjuntos` (`id`, `solicitud_id`, `nombre_archivo_original`, `nombre_archivo_almacenado UUID`, `tipo_mime`, `extension`, `tamano_bytes CHECK <= 5242880`, `hash_sha256`, `uri_almacenamiento`, `usuario_id`, `created_at`). Cero BLOBs en BD. |
+| **RF-023** | Idempotencia en radicación y cambios de estado (RN-011) | `transacciones_idempotencia` (`idempotency_key UUID PRIMARY KEY`, `usuario_id`, `request_hash VARCHAR(64)`, `response_status`, `response_body JSONB`, `created_at`, `expires_at`). |
+| **RF-024** | Confirmación de radicación y cómputo de plazos estimados | Campos en `solicitudes`: `fecha_compromiso_mtta TIMESTAMP`, `fecha_compromiso_mttr TIMESTAMP`. |
 
-### 3.3 Trazabilidad RN → reglas que el modelo debe garantizar
+### 2.4 Módulo 4: Asignación y Gestión de Responsables
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-030** | Asignación a técnico individual o cuadrilla de guardia | Campos en `solicitudes`: `tecnico_asignado_id REFERENCES usuarios(id)`, `cuadrilla_asignada_id REFERENCES cuadrillas_guardia(id)`, `fecha_asignacion TIMESTAMP`. |
+| **RF-031** | Reasignación justificada entre técnicos o turnos | `solicitudes_reasignaciones` (`id`, `solicitud_id`, `tecnico_anterior_id`, `tecnico_nuevo_id`, `motivo_reasignacion TEXT`, `usuario_autorizador_id`, `created_at`). |
+| **RF-032 / RF-033** | Notificaciones inmediatas de asignación a técnicos y solicitante | Generación de evento en `outbox_eventos` dentro de la transacción de asignación. |
 
-| RN | Regla | Mecanismo esperado (detalle en pasos 08/12) |
-|---|---|---|
-| RN-01 | Toda venta confirmada tiene origen de inventario | `inventory_movements` ligado a orden (FK + NOT NULL) |
-| RN-02 | Stock no negativo por venta normal | columnas con CHECK ≥ 0 + `SELECT ... FOR UPDATE` |
-| RN-03 | Reservas expiran por parámetro | `expires_at` + job; umbral en `system_config` |
-| RN-04 | Ajustes con usuario, motivo, fecha y auditoría | `stock_adjustments` NOT NULL usuario/motivo + audit_log |
-| RN-05 | Recepción actualiza inventario solo al confirmarse | estados de `purchase_receptions` |
-| RN-06 | Transferencias con estados controlados | enum de estados en `store_transfers` |
-| RN-07 | Operaciones críticas idempotentes | idempotency_keys + UNIQUE (D-03) |
-| RN-08 | Transacción confirmada no se elimina físicamente | sin DELETE físico en tablas transaccionales; FK con RESTRICT |
+### 2.5 Módulo 5: Ciclo de Vida y Máquina de Estados Finita Determinista
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-040 / RF-041** | Control estricto de transiciones de estado (RN-005) | `solicitudes_historial_estados` (append-only: `id`, `solicitud_id`, `estado_anterior`, `estado_nuevo`, `causal_codigo`, `motivo_texto`, `usuario_id`, `ip_origen`, `created_at UTC`). |
+| **RF-043** | Transición a 'En Espera' con pausa del reloj de SLA (RN-006) | Campos en `solicitudes`: `sla_pausado BOOLEAN DEFAULT FALSE`, `sla_pausado_en TIMESTAMP`, `sla_segundos_pausados_acumulados INT DEFAULT 0`, `fecha_tentativa_reanudacion DATE`. |
+| **RF-044** | Informe técnico obligatorio previo a 'Atendida' (RN-007) | `solicitudes_informes_atencion` (`solicitud_id PRIMARY KEY`, `diagnostico_falla TEXT`, `acciones_ejecutadas TEXT`, `tiempo_real_minutos INT`, `condicion_final_activo VARCHAR(100)`, `repuestos_utilizados JSONB`, `created_at`). |
+| **RF-045 / RF-046** | Rechazo técnico y cancelación con justificación $\ge 20$ car. (RN-009) | Constraint de longitud en campo `motivo_texto CHECK (length(motivo_texto) >= 20)` al transicionar a `Rechazada` o `Cancelada`. |
+| **RF-047** | Reapertura justificada en ventana estricta $\le 48\text{ horas}$ (RN-010) | `solicitudes_reaperturas` (`id`, `solicitud_id`, `motivo_inconformidad TEXT`, `usuario_solicitante_id`, `created_at`). Validación temporal `created_at <= (fecha_atencion + INTERVAL '48 hours')`. |
 
-### 3.4 Restricciones y criterios aplicables
+### 2.6 Módulo 6: Control Temporal, Alertas y Escalamiento
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-050** | Estampa temporal de servidor UTC en hitos del ciclo de vida | Campos en `solicitudes`: `fecha_radicacion_utc`, `fecha_asignacion_utc`, `fecha_inicio_proceso_utc`, `fecha_atencion_utc`, `fecha_cierre_utc`. |
+| **RF-051** | Cálculo dinámico de SLA dual | Campos en `solicitudes`: `sla_calendario_tipo`, `sla_limite_resolucion_utc`, `sla_tiempo_consumido_segundos`. |
+| **RF-052 / RF-053** | Alerta preventiva al 75% y escalamiento jerárquico al 100% | `outbox_eventos` (`id`, `tipo_evento ENUM('ALERTA_SLA_75','ESCALAMIENTO_SLA_100','NOTIF_CORREO')`, `agregado_tipo`, `agregado_id`, `payload JSONB`, `estado`, `created_at`, `scheduled_at`). |
 
-- Linux, contenerizable, sin secretos en repo, tecnologías con mantenimiento activo (`restricciones.md`).
-- CA-01: cada decisión mapeada a RF/RNF. CA-04: DBMS sin sesgo (evaluación real en Paso 06). CA-09: no introducir Kubernetes/microservicios sin justificación.
-- Carga: 25.000 tx/h, pico ×3.0, crecimiento 10x, 8 sucursales, 6 cajas/sucursal, p95 stock/consulta ≤ 500 ms, venta sin pago externo ≤ 1200 ms, disponibilidad 99.9%.
+### 2.7 Módulo 7: Bitácora, Búsqueda y Consultas Operativas
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-060** | Bitácora cronológica inmutable de notas técnicas y seguimiento | `solicitudes_bitacora` (`id`, `solicitud_id`, `tipo_entrada ENUM('NOTA_TECNICA','CAMBIO_GUARDIA','PIEZA_SOLICITADA','COMUNICACION')`, `contenido TEXT`, `usuario_id`, `ip_origen`, `created_at UTC`). |
+| **RF-061 / RF-062** | Filtrado multicriterio y bandejas de trabajo personalizadas | Índices compuestos b-tree sobre `(sede_id, estado, prioridad_asistencial, created_at DESC)` y `(tecnico_asignado_id, estado)`. |
 
-## 4. Decisiones APROBADO que condicionan este diseño
+### 2.8 Módulo 8: Indicadores de Gestión y Auditoría Inmutable
+| Requisito | Descripción | Entidades y Estructuras Derivadas del Modelo |
+| :--- | :--- | :--- |
+| **RF-070 / RF-071** | Tableros de calidad, exportación de reportes y agregados | Vistas de cálculo de MTTA/MTTR y agregaciones temporales procesadas sobre réplica de lectura. |
+| **RF-072 / RN-013** | Pista de auditoría inmutable de todas las operaciones (No Repudio) | `auditoria_eventos` (append-only: `id`, `usuario_id`, `ip_origen`, `accion VARCHAR(50)`, `tabla_afectada`, `registro_id`, `datos_anteriores JSONB`, `datos_nuevos JSONB`, `hash_encadenado SHA256`, `created_at UTC`). |
 
-Tomadas de `04_decisiones/decisiones_base_datos.md` (resumen; fuente autoritativa):
+---
 
-1. Persistencia relacional transaccional (integridad referencial, ACID, locks por fila).
-2. Motor **MySQL 8.x/InnoDB** (alternativas consideradas: PostgreSQL, MySQL+InnoDB, PostgreSQL+Redis). Redis NO APLICA INICIALMENTE.
-3. Una única instancia/base de datos; separación modular por prefijo de nombres de tablas (`auth_`, `inventory_`, `sales_`, `payments_`).
-4. Concurrencia de inventario: reserva temporal + available/reserved + lock breve (APROBADO CON CONDICIÓN — DB-P01…P03).
-5. ACID interno + Saga para pagos externos.
-6. Idempotency Key + UNIQUE (retención inicial 30 días, validar en Paso 07).
-7. Integridad en base de datos (PK/FK/UNIQUE/CHECK/NOT NULL/DEFAULT), trazable a RF/RN.
-8. Auditoría + `inventory_movements` append-only; campos obligatorios en TODAS las tablas: `user_create`, `user_update`, `user_created_at`, `user_update_at`.
-9. No eliminar físicamente transacciones confirmadas; devoluciones como registros nuevos (`return_orders`).
-10. Outbox en la misma transacción de dominio.
-11. `system_config` para RF-100.
-12. Backup completo + binlog (RPO < 1 h / RTO < 4 h provisionales, DB-P05).
-13. Índices derivados de patrones de acceso; particionamiento a evaluar superado ~1.000.000 de filas.
-14. Seguridad: secretos en `.env`/Docker Secrets, TLS, Argon2id, `token_blacklist`.
+## 3. Trazabilidad de Requisitos No Funcionales (RNF) $\rightarrow$ Restricciones Físicas
 
-## 5. Candidatas de entidades confirmadas vs pendientes
+| RNF | Exigencia sobre la Base de Datos | Solución Prevista en el Diseño de Persistencia |
+| :--- | :--- | :--- |
+| **RNF-001** | Latencia de consulta en bandejas $p95 \le 400\text{ ms}$ | Índices compuestos especializados por sede, estado y prioridad asistencial. |
+| **RNF-002** | Latencia de detalle con historial $p95 \le 500\text{ ms}$ | Claves foráneas indexadas (`idx_historial_solicitud`, `idx_adjuntos_solicitud`) sin escaneos completos. |
+| **RNF-003** | Latencia de escritura transaccional $p95 \le 800\text{ ms}$ | Transacciones ACID compactas; transiciones de estado en $\le 3$ sentencias SQL preparadas con commit rápido. |
+| **RNF-004** | Subida y validación de evidencias $\le 2.000\text{ ms}$ | Solo registro de metadatos en BD ($\approx 300\text{ bytes}$); almacenamiento físico desacoplado en NAS/NFS. |
+| **RNF-010 / 011** | $3.000\text{ tx/h}$ nominal, picos de $9.000\text{ tx/h}$ ($\approx 2.5\text{ tx/s}$) | Pool de conexiones dimensionado (50 a 100 conexiones activas); buffer pool ajustado en memoria. |
+| **RNF-012** | 700 usuarios concurrentes simultáneos | Concurrencia optimista con columna `version INT` que previene retención de bloqueos pesimistas. |
+| **RNF-013** | Retención histórica $\ge 5\text{ años}$ ($\ge 1.500.000\text{ solicitudes}$) | Tipos enteros y UUIDs compactos; volumen estimado $\approx 2\text{ GB}$; preparado para particionamiento por año. |
+| **RNF-021** | Viabilidad comprobada en escenario 10x ($30.000\text{ tx/h}$) | A $8.33\text{ tx/s}$, el motor relacional opera a $< 2\%$ de su capacidad de saturación transaccional. |
+| **RNF-022** | Crecimiento multisede (hasta 4 hospitales) | Clave de sede (`sede_id`) en todas las entidades transaccionales; índices particionables por sede. |
+| **RNF-031** | Principio de mínimo privilegio a nivel de base de datos | Usuario exclusivo `s3ih_app_user` con `REVOKE DELETE` general y `REVOKE UPDATE, DELETE` en tablas append-only. |
+| **RNF-035** | Aislamiento y política Zero-PHI | Esquema sin tablas ni columnas para nombres de pacientes, historias clínicas ni diagnósticos médicos. |
+| **RNF-040** | Disponibilidad continua 24/7 en soporte vital | Réplica en caliente (*Hot Standby*) con streaming WAL hacia el Hospital 2. |
+| **RNF-050 / 051** | Metas de recuperación: RPO $\le 60\text{ min}$, RTO $\le 180\text{ min}$ | Respaldos diarios completos + archivado continuo de WAL cada 15 min $\rightarrow$ **RPO $< 15\text{ min}$**, **RTO $< 30\text{ min}$**. |
+| **RNF-070 / 072** | Observabilidad y Correlation ID | Columna `correlation_id UUID NULL` en las tablas `auditoria_eventos` y `outbox_eventos`. |
 
-Las estructuras ya propuestas en el análisis previo (inventory, reservations, orders, payments, token_blacklist, system_config, inventory_movements, idempotency_keys, outbox) se **validan como candidatas**; el proceso formal (conceptual → lógico → normalización → físico) las completará o corregirá contra todos los RF/RNF.
+---
 
-Nuevas obligaciones detectadas en esta lectura y aún no presentes en el análisis previo:
+## 4. Matriz de Entidades Candidatas y Reglas de Integridad
 
-- `purchase_*` (RF-030/031): proveedores, órdenes de compra, recepciones.
-- `store_transfers` (RF-041, RN-06).
-- `return_orders`/`return_order_items` (RF-070, RN-08, §22).
-- `web_carts`/`web_cart_items` (RF-060) — **confirmado 2026-09-22: carrito persiste en BD** (TTL de purga sigue como parámetro, no inventar).
-- `stock_adjustments` con motivo/usuario (RN-04).
-- `pos_registers` (RF-010).
-- Catálogo/precios/promociones (RF-020).
+```mermaid
+classDiagram
+    class Sede {
+        +id INT PK
+        +codigo CHAR(2) UNIQUE
+        +nombre VARCHAR(100)
+        +es_central BOOLEAN
+    }
+    class Servicio {
+        +id INT PK
+        +sede_id INT FK
+        +codigo VARCHAR(20)
+        +tipo VARCHAR(20)
+    }
+    class Usuario {
+        +id INT PK
+        +username VARCHAR(50) UNIQUE
+        +sede_id INT FK
+        +rol_codigo VARCHAR(30)
+    }
+    class Solicitud {
+        +id BIGINT PK
+        +codigo_correlativo VARCHAR(20) UNIQUE
+        +prioridad VARCHAR(20)
+        +estado VARCHAR(30)
+        +version INT
+    }
+    class HistorialEstado {
+        +id BIGINT PK
+        +solicitud_id BIGINT FK
+        +estado_anterior VARCHAR(30)
+        +estado_nuevo VARCHAR(30)
+        +created_at TIMESTAMP
+    }
+    class Adjunto {
+        +id BIGINT PK
+        +solicitud_id BIGINT FK
+        +tamano_bytes BIGINT
+        +uri_almacenamiento VARCHAR(500)
+    }
+    class OutboxEvento {
+        +id BIGINT PK
+        +tipo_evento VARCHAR(50)
+        +payload JSONB
+        +estado VARCHAR(20)
+    }
 
-## 6. Decisiones pendientes que el diseño NO debe inventar
+    Sede "1" --> "*" Servicio
+    Sede "1" --> "*" Usuario
+    Servicio "1" --> "*" Solicitud : resolutor
+    Usuario "1" --> "*" Solicitud : tecnico_asignado
+    Solicitud "1" --> "*" HistorialEstado : transiciones
+    Solicitud "1" --> "*" Adjunto : evidencias
+    Solicitud "1" --> "*" OutboxEvento : eventos_asincronos
+```
 
-Mantener explícitas (DB-P01…DB-P12 de `decisiones_base_datos.md` §23), en especial las que tocan datos:
+### Reglas de Integridad Inviolables:
+1. **Unicidad de Correlativo:** `codigo_correlativo` debe ser inmutable y generado atómicamente por sede y año (`H1-2026-000452`).
+2. **Máquina de Estados Restringida:** Transiciones validadas contra matriz de estados (RN-005).
+3. **Causal Obligatoria:** Cancelaciones y rechazos exigen justificación $\ge 20$ caracteres.
+4. **Informe de Atención Obligatorio:** Toda transición a `Atendida` o `Cerrada` exige la preexistencia del registro en `solicitudes_informes_atencion` (RN-007).
+5. **Cuota de Evidencias:** Archivos adjuntos estrictamente $\le 5\text{ MB}$ ($5.242.880\text{ bytes}$) y máximo 5 archivos por requerimiento.
 
-| ID | Pendiente | Incidencia en modelado |
-|---|---|---|
-| DB-P01 | ~~¿La reserva web bloquea stock para POS?~~ → **CERRADO: SÍ** | semántica de `stock_reserved` (bloqueo al crear reserva) |
-| DB-P02 | ~~Comportamiento al expirar reserva~~ → **CERRADO: TTL 15 min** | estados y job de `inventory_reservations` |
-| DB-P03 | Máximo de productos por transferencia | granularidad de locks |
-| DB-P04 | Proveedor(es) de pago iniciales | estados Saga/Outbox |
-| DB-P05 | RPO/RTO | estrategia de backup |
-| DB-P06 | POS offline | sincronización/conflictos |
-| DB-P07 | Latencia de reportes | agregados vs consulta directa |
-| DB-P08 | Modelo definitivo de clientes | claves/alcance de `customers` |
-| DB-P09 | ~~Precios globales vs por sucursal~~ → **CERRADO: por sucursal** | diseño de `prices` (`sucursal_id NOT NULL`) |
-| DB-P10 | Fulfillment: entrega vs retiro | campos de `sales_orders` |
-| DB-P11 | Herramienta de migraciones | Paso 13 |
-| DB-P12 | Estrategia de eliminación por entidad maestra | soft delete vs estado vs vigencia |
+---
 
-Además, sin resolver en fuentes: ¿el carrito web persiste en BD? (RF-060 no lo especifica) — se modelará en Paso 02 y se marcará como supuesto o pendiente, no como decisión.
+## 5. Conclusión y Traspaso de Etapa
 
-## 7. Criterios de salida de este paso
+El **Paso 01** establece de forma exhaustiva y verificable la trazabilidad entre los 72 requisitos funcionales, 82 requisitos no funcionales, 13 reglas de negocio y las futuras entidades y restricciones de la base de datos de S3IH, sin haber adelantado sentencias SQL prematuras.
 
-- [x] RF, RN, RNF, restricciones y decisiones leídos.
-- [x] Trazabilidad RF → entidades, RNF → propiedades, RN → reglas.
-- [x] Decisiones aprobadas respetadas; pendientes declaradas.
-- [x] Sin SQL generado.
-
-**Estado:** Paso 01 COMPLETADO → siguiente: Paso 02 (modelo conceptual).
+El siguiente paso obligatorio del workflow corresponde a:
+> **Paso 02 — Modelo Conceptual (`02_modelo_conceptual/modelo_conceptual.md`):**  
+> Definir formalmente las entidades, relaciones, cardinalidades, atributos conceptuales y reglas de negocio del dominio hospitalario S3IH utilizando el skill `database-schema-designer`.

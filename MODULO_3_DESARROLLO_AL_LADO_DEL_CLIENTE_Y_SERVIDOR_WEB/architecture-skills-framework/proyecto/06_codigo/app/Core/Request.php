@@ -5,6 +5,8 @@ namespace App\Core;
 
 final class Request
 {
+    public static ?string $testInput = null;
+
     public readonly string $method;
     public readonly string $path;
 
@@ -21,7 +23,7 @@ final class Request
     public function body(): ?array
     {
         if (!$this->bodyParsed) {
-            $raw = file_get_contents('php://input');
+            $raw = self::$testInput !== null ? self::$testInput : file_get_contents('php://input');
             // CP-INT-04: solo se acepta JSON con Content-Type application/json
             // (bloquea payloads de formularios/fetch cross-site → defensa CSRF en profundidad)
             $ct = $_SERVER['CONTENT_TYPE'] ?? '';
@@ -35,9 +37,51 @@ final class Request
         return $this->body;
     }
 
+    public static array $testHeaders = [];
+
     public function param(string $name): string
     {
         return $this->params[$name] ?? '';
+    }
+
+    public function header(string $name): ?string
+    {
+        $keyUpper = strtoupper(str_replace('-', '_', $name));
+        if (isset(self::$testHeaders[$name])) {
+            return (string) self::$testHeaders[$name];
+        }
+        if (isset(self::$testHeaders[$keyUpper])) {
+            return (string) self::$testHeaders[$keyUpper];
+        }
+
+        $serverKey = 'HTTP_' . $keyUpper;
+        if (isset($_SERVER[$serverKey])) {
+            return (string) $_SERVER[$serverKey];
+        }
+        if (isset($_SERVER[$keyUpper])) {
+            return (string) $_SERVER[$keyUpper];
+        }
+
+        if (function_exists('getallheaders')) {
+            $headers = getallheaders();
+            foreach ($headers as $k => $v) {
+                if (strcasecmp($k, $name) === 0) {
+                    return (string) $v;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    public function ip(): string
+    {
+        $forwarded = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '';
+        if ($forwarded !== '') {
+            $ips = explode(',', $forwarded);
+            return trim($ips[0]);
+        }
+        return $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     }
 
     public function setParams(array $params): void

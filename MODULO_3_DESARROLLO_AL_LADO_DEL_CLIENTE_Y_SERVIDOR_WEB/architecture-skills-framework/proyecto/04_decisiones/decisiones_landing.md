@@ -1,12 +1,13 @@
-# Decisiones — Landing pública
+# Decisiones — Portal de Acceso Institucional S3IH
 
-- D-LAND-01: `07_landing` está separado de `06_codigo`. APROBADO.
-- D-LAND-02: recibe tráfico de anuncios y conduce a CTA comercial. APROBADO.
-- D-LAND-03: sin autenticación/login/dashboard. APROBADO.
-- D-LAND-04: usar `landing_categoria` y `landing_producto`; no reutilizar directamente `cat_*`. APROBADO.
-- D-LAND-05: 7 categorías × 10 productos; precios demostrativos en Bs. APROBADO.
-- D-LAND-06: runtime de solo lectura. APROBADO.
-- D-LAND-07: imágenes gratuitas verificables; no IA. APROBADO.
-- D-LAND-08: PHP + MySQL/InnoDB + PDO + HTML/CSS/JS + jQuery + Bootstrap/Tailwind puro. APROBADO.
-- D-LAND-09: Taste para creación; Impeccable/Vercel/Emil para controles post-create. APROBADO.
-- D-LAND-10: human-in-the-loop obligatorio. APROBADO.
+**Estado:** APROBADO  
+**Fecha:** 2026-10-07  
+**Dominio:** Portal Institucional Informativo y Acceso Rápido para S3IH  
+
+---
+
+- **D-PORTAL-01:** El portal institucional o landing informativa (`07_landing`) opera como puerta de bienvenida informativa y acceso rápido al sistema para el personal hospitalario de las 4 sedes.
+- **D-PORTAL-02:** Presenta la red hospitalaria, catálogo informativo de unidades resolutoras (Biomédico, Infraestructura, Farmacia Interna, TI, Esterilización), canales de soporte de contingencia y enlace directo al sistema `/login`.
+- **D-PORTAL-03:** Runtime de solo lectura institucional, sin consumo de datos asistenciales ni exposición de información sensible.
+- **D-PORTAL-04:** Política estricta Zero-PHI (ninguna mención ni exposición de datos clínicos o de pacientes).
+- **D-PORTAL-05:** Estilo estético profesional institucional con CSS puro, responsive, accesible (WCAG 2.1 AA) y de carga ultra-rápida.

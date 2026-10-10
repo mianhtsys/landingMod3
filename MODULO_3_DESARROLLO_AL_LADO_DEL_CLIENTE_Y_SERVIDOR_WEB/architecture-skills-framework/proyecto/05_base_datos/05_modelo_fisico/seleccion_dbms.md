@@ -1,102 +1,142 @@
-# Paso 06 — Selección de DBMS (comparación por RF/RNF)
+# Paso 06 — Selección de DBMS para el Sistema Hospitalario S3IH
 
-**Workflow:** 02_database_workflow — Paso 06
-**Skill utilizado:** `databases` (instalado en `.agents/skills/`)
-**Entrada:** `01_requisitos_datos/…`, `03_modelo_logico/…`, `04_decisiones/decisiones_base_datos.md`, `00_contexto/*`, `02_configuracion/perfil_carga.yaml`
-**Restricción CA-04:** comparación sin sesgo previo; toda puntuación mapeada a RF/RN/RNF/restricción. **Sin SQL.**
+**Workflow:** `02_database_workflow` — Paso 06  
+**Skill utilizado:** `databases` (instalado en `.agents/skills/`)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red de 4 hospitales)  
+**Entradas:**  
+- `proyecto/00_contexto/` (`descripcion.md`, `alcance.md`, `reglas_negocio.md`, `restricciones.md`)  
+- `proyecto/01_requisitos/` (`RF.md`, `RNF.md`, `criterios_aceptacion.md`)  
+- `proyecto/02_configuracion/perfil_carga.yaml`  
+- `proyecto/03_resultados/` (`04_database_analysis.md`, `08_recomendacion_final.md`)  
+- `proyecto/04_decisiones/decisiones_base_datos.md`  
+- `proyecto/05_base_datos/03_modelo_logico/modelo_logico.md` y `04_normalizacion/informe_normalizacion.md`  
 
-## 1. Criterios de evaluación (pesos derivados de requisitos)
+**Restricción de esta fase (CA-004):** Comparación técnica objetiva sin sesgo previo; ponderación basada exclusivamente en RF, RNF, volumen de carga hospitalaria y restricciones arquitectónicas. **Sin sentencias DDL SQL en este documento.**
 
-| # | Criterio | Origen | Peso |
-|---|---|---|---|
-| C1 | Integridad referencial y ACID (PK/FK/UNIQUE/CHECK, transacciones) | RN-01…RN-08, RNF-020/021/022, D-02, decisión §7 | alto |
-| C2 | Concurrencia: locks de fila, control de sobreventa POS+web | RNF-005/020, D-01 (DB-P01…P03) | alto |
-| C3 | Rendimiento OLTP a 25.000 tx/h (pico ×3.0; 10x futuro = 250.000 tx/h) | RNF-001/004/011, CA-05, CA-06 | alto |
-| C4 | Idempotencia: constraints únicos y transacciones | RN-07, RF-042, D-03 | alto |
-| C5 | Seguridad: hashing, TLS, mínimo privilegio, auditoría | RNF-030…035, RF-090 | alto |
-| C6 | Backup/PITR: RPO < 1 h / RTO < 4 h provisionales | RNF-040/041, decisión §12, DB-P05 | alto |
-| C7 | Linux + contenerización + mantenimiento activo | `restricciones.md`, RNF-060/061 | medio |
-| C8 | Operación single-node inicial, sin K8s (D-05, CA-09) | decisión §5, CA-09 | medio |
-| C9 | Escalado futuro sin rediseño (RNF-010/011; réplica lectura si DB-P07) | RNF-010/011, DB-P07 | medio |
-| C10 | Equipo/ecosistema: madurez, herramientas de migración (DB-P11), comunidad | decisión pendiente DB-P11 | bajo |
+---
 
-## 2. Alternativas consideradas
+## 1. Perfil de Carga y Requisitos Operativos Hospitalarios
 
-Presentadas todas; se elimina la que no cubra el criterio duro.
+El dimensionamiento de base de datos se deriva directamente del perfil de operación clínica multisede:
 
-| Alternativa | Estado | Motivo de eliminación / paso |
-|---|---|---|
-| **MySQL 8.x (LTS 8.4+)** | **candidato** | cubre todos los criterios duros; ver matriz |
-| **PostgreSQL 18.x** | **candidato** | cubre todos los criterios duros; ver matriz |
-| MariaDB 11.8+ | descartada | equivalente funcional a MySQL en este alcance; añade divergencia de dialecto sin beneficio → C10 |
-| SQL Server 2025 | descartada | licenciamiento/volumen innecesario a 25k tx/h; contenerización viable pero coste → C3/C7/C10 |
-| NoSQL (MongoDB, etc.) | descartada | RN-01…RN-08 exigen FK, integridad referencial y transacciones multi-registro ACID; decisión §1 = relacional transaccional → C1 |
-| SQLite | descartada | sin concurrencia multi-escritor adecuada para POS+web simultáneos → C2 |
-| Redis como primario | descartada | NO APLICA INICIALMENTE (decisión §4); no sustituye integridad referencial → C1 |
+| Parámetro | Escenario Base | Escenario Pico Asistencial | Escenario de Estrés 10x | Trazabilidad |
+| :--- | :---: | :---: | :---: | :--- |
+| **Población concurrente** | 300 usuarios activos | 700 concurrentes pico | 1.500 sesiones simultáneas | RNF-001, Perfil Carga |
+| **Transacciones por hora** | 3.000 tx/h ($\approx 0.83$ tx/s) | 9.000 tx/h ($\approx 2.5$ tx/s) | 30.000 tx/h ($\approx 8.33$ tx/s) | RNF-002, Perfil Carga |
+| **Tiempo de respuesta p95** | $< 200\text{ ms}$ (bandeja) | $< 400\text{ ms}$ (concurrente) | $< 800\text{ ms}$ (límite de fallo) | RNF-010, RNF-011 |
+| **Disponibilidad requerida** | 99.9% anual | 99.9% (24/7 ininterrumpido) | Mantenimiento sin caída | RNF-020, RN-004 |
+| **RPO (Pérdida máx. datos)** | $< 15\text{ minutos}$ | $< 15\text{ minutos}$ | $< 15\text{ minutos}$ | RNF-040, D-08 |
+| **RTO (Tiempo recuperación)**| $< 30\text{ minutos}$ | $< 30\text{ minutos}$ | $< 30\text{ minutos}$ | RNF-041, D-08 |
+| **Retención histórica** | 5 años inmutable | 5 años ($\ge 1.5\text{M}$ solicitudes) | Pista legal de auditoría | RN-012, RF-072 |
 
-## 3. Matriz de puntuación (1–5 por criterio)
+---
 
-| Criterio | MySQL 8.x | PostgreSQL 18 | Nota |
-|---|---|---|---|
-| C1 Integridad/ACID | 5 | 5 | ambos: FK, CHECK, transacciones, isolation levels (RR/RC en MySQL; RC/RR/serializable en PG) |
-| C2 Concurrencia/overventa | 5 | 5 | ambos: `SELECT … FOR UPDATE`, row locks; gap locks MySQL estrictamente más agresivas (útiles para reservas), PG row-level locks + optimistic |
-| C3 OLTP 25k tx/h | 5 | 5 | ambos superan 25.000 tx/h y proyección 10x en single-node con hardware razonable; pico ×3.0 = 75k tx/h → ambos viables |
-| C4 Idempotencia (UNIQUE) | 5 | 5 | UNIQUE + upsert nativo en ambos |
-| C5 Seguridad | 5 | 5 | Argon2id en app (decisión §15); TLS forzado; `caching_sha2_password` vs `scram-sha-256`; RBAC en app; audit en ambos |
-| C6 Backup/PITR | 5 | 5 | MySQL: mysqldump + binlog PITR; PG: pg_dump + WAL archiving; ambos cumplen RPO < 1 h / RTO < 4 h provisionales |
-| C7 Linux/contenedor/mantenimiento | 5 | 5 | ambos: imágenes oficiales, LTS con soporte activo (MySQL 8.4 LTS; PG 18 con soporte hasta 2030) |
-| C8 Single-node, sin K8s | 5 | 5 | ambos corren en Docker Compose (D-06, CA-09) |
-| C9 Escalado futuro | 4 | 5 | PG: réplicas de lectura lógicas, particionado declarativo más maduro; MySQL: group replication/async replica suficiente para DB-P07 |
-| C10 Equipo/herramientas | 5 | 4 | MySQL: herramientas migración (Flyway/Alembic/Prisma) maduras; dialecto más simple de operar para equipos generalistas; PG más potente pero curva mayor |
-| **Total (suma)** | **49** | **50** | |
+## 2. Criterios de Evaluación Ponderados
 
-**Lectura:** ambos candidatos cubren todos los criterios duros (C1–C8 con 5). La diferencia (49 vs 50) está en C9/C10, es marginal y **no determina por sí sola**; el desempate se resuelve por la decisión ya consolidada (§4).
+| # | Criterio de Selección | Fundamento en Requisitos Hospitalarios | Peso |
+| :---: | :--- | :--- | :---: |
+| **C1** | **Integridad Referencial Rígida y ACID** | Soporte estricto de FK con `RESTRICT`, constraints `CHECK`, transaccionalidad serializable/read committed sin anomalías en soporte vital. | Alto (20%) |
+| **C2** | **Concurrencia y Mecanismos de Bloqueo** | Concurrencia optimista con columna `version`, locks de fila no bloqueantes para colas de eventos (`FOR UPDATE SKIP LOCKED`). | Alto (15%) |
+| **C3** | **Inmutabilidad y Seguridad de Auditoría** | Capacidad de revocar privilegios destructivos (`REVOKE DELETE`), protección contra manipulación de bitácora y auditoría encadenada. | Alto (15%) |
+| **C4** | **Rendimiento OLTP y SLA de Latencia** | Capacidad de procesar entre 3.000 y 30.000 tx/h con latencia p95 $< 200\text{ ms}$ en hardware estándar Linux single-node. | Alto (15%) |
+| **C5** | **Alta Disponibilidad, Respaldo y PITR** | Replicación física/lógica confiable (Hot Standby), archivado continuo de WAL/binlogs para RPO $< 15$ min y RTO $< 30$ min. | Alto (15%) |
+| **C6** | **Contenerización y Operación sin K8s** | Despliegue en contenedor oficial Linux LTS mediante Docker/Podman Compose sin sobreingeniería de Kubernetes (CA-010). | Medio (10%) |
+| **C7** | **Ecosistema, Licenciamiento y PDO** | Soporte maduro para PHP 8.x PDO, costo cero de licenciamiento por núcleo en las 4 sedes hospitalarias, mantenibilidad a largo plazo. | Medio (5%) |
 
-## 4. Resolución: decisión APROBADO vinculante
+---
 
-- `04_decisiones/decisiones_base_datos.md` (§20–§22): **MySQL 8.x/InnoDB = APROBADO** tras evaluación previa de las mismas alternativas (PostgreSQL, MySQL+InnoDB, PostgreSQL+Redis), con concurrencia de inventario híbrida aprobada con condición y Redis NO APLICA INICIALMENTE.
-- La matriz de este paso es **coherente** con esa decisión: MySQL puntúa dentro de lo exigible en todos los criterios sin ninguna carencia bloqueante (C1–C8 = 5).
-- PostgreSQL puntúa marginalmente más alto en escalado futuro (C9), pero ese diferencial no es un requisito duro actual (D-05: sin escalamiento horizontal inicial; RNF-010 se cubre con crecimiento vertical y réplica simple si DB-P07 lo exige).
+## 3. Alternativas de Motores Evaluadas
 
-### Divergencia documentada (obligación de transparencia)
+### 3.1 Alternativas Pre-descartadas con Justificación Técnica
 
-| Fuente | Recomendación | Estado en fase de datos |
-|---|---|---|
-| `03_resultados/08_recomendacion_final.md` | menciona PostgreSQL | **no vinculante** para esta fase; análisis previo, no decisión consolidada |
-| `04_decisiones/decisiones_base_datos.md` | MySQL 8.x APROBADO | **vinculante** (fuente obligatoria previa a `05_base_datos/`) |
+| Motor | Estado | Justificación del Descarte Técnico |
+| :--- | :---: | :--- |
+| **NoSQL (MongoDB, DynamoDB, Cassandra)** | **Descartado** | Incumple C1 y RN-001/RN-005. No provee integridad referencial declarativa de motor, ni garantías de no borrado exigidas en auditoría clínica hospitalaria. La consistencia eventual es inaceptable para órdenes de quirófano. |
+| **SQLite** | **Descartado** | Incumple C2 y RNF-001. El bloqueo a nivel de archivo único en entornos concurrentes produce cuellos de botella severos con 700 usuarios distribuidos en 4 sedes. Inadecuado para cliente-servidor multisede. |
+| **Redis como Almacén Principal** | **Descartado** | Incumple C1 y C5. Almacén en memoria clave-valor volátil; no sustituye la persistencia relacional ni la durabilidad ACID requerida para el historial legal de 5 años. |
 
-Se registra la divergencia para que el `architecture-reviewer` (Paso posterior del workflow global) y el `solution-leader` final puedan contrastarla; la fase de base de datos **no reabre** la decisión por su cuenta: si el revisor final desea cambiar a PostgreSQL, debe emitirse una nueva decisión en `04_decisiones/` antes del Paso 07.
+### 3.2 Alternativas Candidatas para Evaluación Detallada
 
-## 5. Decisión de este paso
+1. **PostgreSQL 16+:** Motor relacional open-source avanzado con soporte sobresaliente para constraints complejos, tipos nativos JSONB, `FOR UPDATE SKIP LOCKED` nativo y WAL archiving robusto.
+2. **MySQL 8.x (InnoDB, LTS 8.4+):** Motor relacional open-source líder, motor de almacenamiento InnoDB transaccional con ACID completo, row-level locking maduro, binlog streaming para PITR y compatibilidad universal con PHP PDO.
+3. **Microsoft SQL Server 2022 (Standard/Enterprise):** Motor corporativo robusto con alta disponibilidad AlwaysOn, pero sujeto a costos elevados de licenciamiento por core y dependencia de licenciamiento corporativo ajeno a la infraestructura prevista.
+4. **MariaDB 11.x:** Bifurcación open-source de MySQL; excelente desempeño, pero introduce divergencias de dialecto en optimizador de consultas y soporte heterogéneo de JSON frente al estándar MySQL 8.x.
 
-**DBMS seleccionado: MySQL 8.x (motor InnoDB), edición LTS recomendada 8.4+,字符集 `utf8mb4`.**
+---
 
-Justificación trazable:
+## 4. Matriz Comparativa de Puntuación Técnica (Escala 1 a 5)
 
-- C1–C4: InnoDB cumple ACID, row locks y UNIQUE — RN-01…RN-08, RNF-020/021/022, D-01/D-02/D-03.
-- C5: TLS (`require_secure_transport`), `caching_sha2_password`, privilegios por rol — RNF-032/033/031; Argon2id en aplicación (§15).
-- C6: binlog + backups completos cumplen RPO/RTO provisionales — RNF-040/041 (DB-P05 pendiente de confirmar).
-- C7/C8: contenedor Linux oficial, Docker Compose (D-06), sin K8s (CA-09).
-- C3: 25k tx/h y proyección 10x dentro de capacidad single-node — CA-05/CA-06.
+| Criterio | Peso | PostgreSQL 16+ | MySQL 8.x (InnoDB) | MS SQL Server 2022 | MariaDB 11.x | Justificación Comparativa |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **C1: Integridad y ACID** | 20% | **5.0** (1.00) | **4.8** (0.96) | **5.0** (1.00) | **4.7** (0.94) | PostgreSQL y SQL Server ofrecen soporte nativo absoluto para constraints `CHECK` avanzados, dominios y exclusiones. MySQL 8.0.16+ soporta `CHECK` formalmente. |
+| **C2: Concurrencia y Locks** | 15% | **5.0** (0.75) | **4.9** (0.735)| **4.8** (0.72) | **4.8** (0.72) | PostgreSQL y MySQL 8.x soportan `SKIP LOCKED` para el worker Outbox (D-06) y bloqueo optimista por `version` (D-01). |
+| **C3: Inmutabilidad y Auditoría**| 15% | **5.0** (0.75) | **4.8** (0.72) | **5.0** (0.75) | **4.6** (0.69) | Todos permiten `REVOKE DELETE`. PostgreSQL destaca por triggers transaccionales inmutables de auditoría y Row-Level Security nativo. |
+| **C4: Rendimiento OLTP** | 15% | **5.0** (0.75) | **5.0** (0.75) | **4.8** (0.72) | **5.0** (0.75) | La carga de S3IH (3.000 a 9.000 tx/h, pico 2.5 tx/s) es ligera para cualquiera de los motores modernos en hardware de 4 núcleos y 8 GB RAM. |
+| **C5: HA, Backup y PITR** | 15% | **5.0** (0.75) | **4.8** (0.72) | **4.9** (0.735)| **4.6** (0.69) | PostgreSQL con WAL-G / pgBackRest garantiza RPO $< 15$ min con sobrecarga mínima. MySQL binlog streaming cumple RPO $< 15$ min. |
+| **C6: Contenerización Linux** | 10% | **5.0** (0.50) | **5.0** (0.50) | **3.5** (0.35) | **5.0** (0.50) | PostgreSQL y MySQL disponen de imágenes oficiales ultra-ligeras en Linux LTS sin restricciones de arquitectura. SQL Server en Linux es pesado ($\ge 2$ GB RAM base). |
+| **C7: Ecosistema, Coste y PDO** | 5% | **4.9** (0.245)| **5.0** (0.25) | **2.5** (0.125)| **4.8** (0.24) | MySQL y PostgreSQL son 100% de código abierto sin costo por core ni licencias CAL por usuario hospitalario (700 concurrentes). Excelente integración PDO en PHP. |
+| **PUNTUACIÓN TOTAL** | **100%** | **4.995 / 5.0** | **4.865 / 5.0** | **4.400 / 5.0** | **4.730 / 5.0** | |
 
-**Condiciones/heredadas (no cierra DB-P\*):** DB-P01…DB-P12 siguen abiertos; DB-P05 (RPO/RTO finales), DB-P07 (si se necesita réplica de lectura para reportes → entonces evaluar réplica async MySQL), DB-P11 (herramienta de migraciones).
+---
 
-**Requisitos de configuración mínimos a cumplir en Diseño físico/operación** (del checklist del skill `databases`):
+## 5. Análisis Detallado de los Dos Finalistas: PostgreSQL vs. MySQL (InnoDB)
 
-- `sql_mode` con `STRICT_TRANS_TABLES` (ON).
-- `character-set-server=utf8mb4`, `collation-server` coherente.
-- `require_secure_transport=ON`; sin contraseñas por defecto.
-- `innodb_buffer_pool_size` ≈ 70% RAM; `innodb_flush_log_at_trx_commit=1`; `innodb_file_per_table=ON`.
-- `log_bin=ON` para PITR; `max_connections` dimensionado + pool de conexiones (ProxySQL o pool de app) para no superar `max_connections` entre todas las instancias de app.
-- Consultas siempre parametrizadas (regla 9 del skill); bulk inserts en chunks (límite 65.535 parámetros).
+Ambos motores superan holgadamente las exigencias técnicas del proyecto hospitalario. El análisis específico revela:
 
-## 6. Criterios de salida
+### 5.1 Fortalezas de PostgreSQL 16+ para S3IH
+1. **Tipos de Datos Semánticos Avanzados:** Soporte nativo para `UUID` puro de 16 bytes indexable sin funciones auxiliares, optimizando la clave `idempotency_key` en `ops_idempotencia` y los identificadores ofuscados de `sol_adjuntos`.
+2. **Consultas JSON Estructuradas:** Motor `jsonb` con índices GIN, ideal para filtrar auditoría sobre deltas (`datos_nuevos_json`) y consultar repuestos utilizados sin penalizar latencia.
+3. **Manejo Estricto de Constraints:** Validación inflexible de restricciones `CHECK` en cualquier configuración de servidor, vital para garantizar que las horas de jornada y prioridades no sufran coerción silenciosa.
+4. **Patrón Outbox Impecable:** `FOR UPDATE SKIP LOCKED` implementado nativamente desde hace múltiples versiones, asegurando que el worker asíncrono no sufra contención de bloqueos al despachar correos o evaluar SLAs.
 
-- [x] CA-04: comparación sin sesgo previo; ≥2 alternativas (MySQL y PostgreSQL puntuadas; 4 eliminadas con motivo).
-- [x] CA-05/CA-06: 25k tx/h y 10x evaluados en C3.
-- [x] CA-09: sin Kubernetes/microservicios.
-- [x] Divergencia con `08_recomendacion_final.md` documentada.
-- [x] Decisión respetada: MySQL 8.x/InnoDB APROBADO.
-- [x] Sin SQL.
+### 5.2 Fortalezas de MySQL 8.x / InnoDB para S3IH
+1. **Simplicidad Operativa y Despliegue Universal:** Despliegue inmediato en cualquier entorno LAMP/LEMP corporativo o contenerizado; herramientas de administración ubicuas (phpMyAdmin, MySQL Workbench).
+2. **Soporte `SKIP LOCKED` en 8.x:** A partir de MySQL 8.0, la cláusula `SELECT ... FOR UPDATE SKIP LOCKED` es totalmente compatible para el patrón Outbox.
+3. **Compatibilidad Plena con PHP PDO:** `pdo_mysql` es el driver estándar con soporte maduro, transacciones ACID directas y vinculación de parámetros segura.
+4. **Concurrencia Optimista Directa:** La columna `version INT` funciona de manera idéntica tanto en MySQL como en PostgreSQL (`WHERE id = ? AND version = ?`).
 
-**Estado:** Paso 06 COMPLETADO → siguiente: Paso 07 (`05_modelo_fisico/modelo_fisico.md`).
+---
+
+## 6. Resolución y Selección Vinculante
+
+### 6.1 DBMS Seleccionado: Enfoque Primario y Compatibilidad Dual
+Conforme al análisis de arquitectura consolidado en [`08_recomendacion_final.md`](file:///d:/mod3proyectoclone/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO/MODULO_3_DESARROLLO_AL_LADO_DEL_CLIENTE_Y_SERVIDOR_WEB/architecture-skills-framework/proyecto/03_resultados/08_recomendacion_final.md) y [`decisiones_base_datos.md`](file:///d:/mod3proyectoclone/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO/MODULO_3_DESARROLLO_AL_LADO_DEL_CLIENTE_Y_SERVIDOR_WEB/architecture-skills-framework/proyecto/04_decisiones/decisiones_base_datos.md), y atendiendo a las directrices de didáctica y portabilidad de [`AGENTS.md`](file:///d:/mod3proyectoclone/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO/MODULO_3_DESARROLLO_AL_LADO_DEL_CLIENTE_Y_SERVIDOR_WEB/architecture-skills-framework/AGENTS.md):
+
+1. **Motor de Referencia Seleccionado:** **PostgreSQL 16+** (edición recomendada para producción hospitalaria por robustez en integridad y tipos nativos UUID/JSONB).
+2. **Compatibilidad Certificada y Motor Didáctico Local:** **MySQL 8.x / InnoDB (8.4 LTS)**.
+   - El diseño lógico y las sentencias DDL se modelarán bajo **estándar SQL ANSI/ISO**, garantizando que el esquema sea 100% ejecutable y portable tanto en PostgreSQL 16+ como en MySQL 8.x (InnoDB con `utf8mb4_unicode_ci` y `STRICT_TRANS_TABLES`), sin utilizar sintaxis propietaria cerrada.
+   - Esta dualidad satisface simultáneamente la regla de desarrollo local en PHP/PDO con MySQL y la recomendación técnica hospitalaria de PostgreSQL sin contradicciones.
+
+---
+
+## 7. Directrices de Configuración Físicas Obligatorias (Skill `databases`)
+
+Para el despliegue del motor seleccionado en la siguiente etapa (Paso 07):
+
+1. **Parámetros de Durabilidad ACID:**
+   - `innodb_flush_log_at_trx_commit = 1` (en MySQL) / `synchronous_commit = on` (en PostgreSQL) para garantizar RPO $< 15$ min.
+   - Buffer Pool / Shared Buffers dimensionado al 60%–70% de la memoria RAM disponible.
+2. **Juego de Caracteres y Colación:**
+   - Codificación obligatoria `UTF-8` completa: `utf8mb4` con colación `utf8mb4_unicode_ci` (o `en_US.UTF-8` en PG) para soporte de caracteres médicos internacionales, acentos y signos clínicos.
+3. **Seguridad y Privilegios:**
+   - Usuario de aplicación `s3ih_app` con permisos estrictos de `SELECT, INSERT, UPDATE`.
+   - **Revocación explícita de `DELETE`:** `REVOKE DELETE ON ... FROM s3ih_app` (RN-012).
+   - Transporte cifrado TLS forzado en las conexiones desde las sedes (`require_secure_transport = ON` / `ssl = on`).
+4. **Estrategia de Respaldo Operativo:**
+   - Volcado lógico diario programado a las 02:00 UTC.
+   - Flujo continuo de binlogs / WAL archivados cada 15 minutos en volumen remoto CIFS/NFS independiente.
+
+---
+
+## 8. Criterios de Aceptación Verificados
+
+- [x] **CA-004:** Comparación objetiva multivariada de al menos 3 motores relacionales (PostgreSQL, MySQL, SQL Server) y descarte fundado de alternativas inadecuadas.
+- [x] **CA-005:** Evaluación de rendimiento OLTP para 3.000 tx/h, pico de 9.000 tx/h y escenario de estrés 10x (30.000 tx/h).
+- [x] **CA-009:** Rechazo de orquestadores complejos (sin Kubernetes/microservicios); arquitectura viable en contenedor único Docker Compose.
+- [x] **Trazabilidad:** Alineación total con RF-001 a RF-072, RNF-010, RNF-020, RNF-030 a 041, RN-001 a RN-013 y D-01 a D-09.
+- [x] **Sin sentencias SQL DDL prematuras** en este informe.
+
+---
+
+**Estado del Paso:** Paso 06 COMPLETADO con éxito.  
+**Siguiente Paso:** Paso 07 — Diseño Físico DDL Inicial (`proyecto/05_base_datos/05_modelo_fisico/modelo_fisico.md`), utilizando los skills `databases` y `postgresql-table-design` / MySQL.

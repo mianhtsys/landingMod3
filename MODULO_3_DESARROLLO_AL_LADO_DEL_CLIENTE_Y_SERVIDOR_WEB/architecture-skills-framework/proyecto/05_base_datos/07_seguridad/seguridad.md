@@ -1,121 +1,209 @@
-# Paso 09 — Seguridad
+# Paso 09 — Seguridad y Control de Acceso de Base de Datos (S3IH)
 
-**Workflow:** 02_database_workflow — Paso 09
-**Skill utilizado:** `databases` (MySQL-specific + Production Checklist; `postgresql-table-design` NO aplica — DBMS = MySQL; `sqlserver-security` NO aplica)
-**Entrada:** `05_modelo_fisico/{modelo_fisico.md,seleccion_dbms.md}`, `06_integridad/integridad.md`, `04_decisiones/decisiones_base_datos.md`, `01_requisitos/RNF.md`, `00_contexto/*`
-**DBMS:** MySQL 8.x LTS (8.4+) / InnoDB — APROBADO vinculante (Paso 06)
-**Objetivo:** política de seguridad de la capa de datos; sin SQL de migración, sin credenciales reales.
+**Workflow:** `02_database_workflow` — Paso 09  
+**Skill utilizado:** `databases` (Production Hardening & Access Control)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red de 4 hospitales)  
+**Entradas:**  
+- `proyecto/05_base_datos/05_modelo_fisico/{modelo_fisico.md,seleccion_dbms.md}`  
+- `proyecto/05_base_datos/06_integridad/integridad.md`  
+- `proyecto/04_decisiones/decisiones_base_datos.md`  
+- `proyecto/01_requisitos/RNF.md`  
+- `proyecto/00_contexto/restricciones.md`  
 
-## 1. Trazabilidad RF/RNF → control
+**Objetivo:** Establecer la arquitectura y política de seguridad integral en la capa de datos: autenticación de servicios, principio de mínimo privilegio (PoLP), revocación explícita de sentencias destructivas (`REVOKE DELETE`), cifrado en tránsito y reposo, aislamiento de red y cumplimiento de la política Zero-PHI. **Sin exponer credenciales reales ni generar migraciones activas.**
 
-| RNF/RF | Requisito | Control en BD |
-|---|---|---|
-| RNF-030 | autenticación de administración | usuarios MySQL dedicados por rol; sin cuentas compartidas; `caching_sha2_password` |
-| RNF-031 | mínimo privilegio | GRANT por rol de BD (app / DBA / backup / migraciones); sin `ALL PRIVILEGES` a la app |
-| RNF-032 | cifrado en tránsito | `require_secure_transport=ON`; TLS 1.2+ obligatorio |
-| RNF-033 | sin contraseñas en claro | hashing MySQL `caching_sha2_password`; contraseñas de app solo en `.env`/secrets; Argon2id en app para usuarios finales (§15 decisiones) |
-| RNF-034 | secretos fuera del repo | `.env` / Docker Secrets; jamás en `my.cnf` versionado ni en artefactos `05_base_datos/` |
-| RNF-035 | controles para APIs | la app se conecta con usuario propio de BD; APIs no hablan MySQL directamente; SQL siempre parametrizado |
-| RF-001 | roles/permisos | RBAC en app (`auth_rol`/`auth_permiso`); en BD: roles separados app vs admin |
-| RF-090 | auditoría crítica | `core_auditoria` append-only + GRANT INSERT-only al rol app (ver §4) |
-| CA-09 / D-06 | Docker Compose, sin K8s | secretos por env/Compose secrets; red interna del compose no expone 3306 al host en prod |
+---
 
-## 2. Autenticación y usuarios de BD
+## 1. Trazabilidad Requisitos de Seguridad $\rightarrow$ Controles de Base de Datos
 
-**Regla:** mínimo privilegio; una cuenta de BD por función, nunca root desde la app.
+| Requisito | Descripción del Requisito de Seguridad | Control Técnico en la Capa de Base de Datos |
+| :--- | :--- | :--- |
+| **RNF-030** | Autenticación robusta y control de sesiones (30 min en puestos compartidos de quirófano) | Cuentas dedicadas por servicio; soporte de autenticación moderna (`caching_sha2_password` / `scram-sha-256`); sin conexiones directas del usuario final a la BD. |
+| **RNF-031** | Principio de Mínimo Privilegio (PoLP) y Segregación de Funciones (SoD) | Roles segregados en motor (`s3ih_app`, `s3ih_worker`, `s3ih_backup`, `s3ih_dba`); prohibición de privilegios globales `ALL PRIVILEGES` o `SUPER`. |
+| **RNF-032** | Cifrado mandatorio en tránsito | TLS 1.3 / 1.2 forzado en el motor: `require_secure_transport = ON` (MySQL) / `ssl = on` (PostgreSQL); rechazo de conexiones TCP en texto claro. |
+| **RNF-033** | Cifrado en reposo y protección de secretos | Cifrado a nivel de volumen de datos (LUKS / dm-crypt) o Tablespace Encryption (InnoDB/TDE). Credenciales protegidas en `.env` / Docker Secrets. |
+| **RNF-034** | Prohibición absoluta de credenciales en repositorios | Ninguna contraseña, hash o cadena de conexión se incluye en scripts SQL versionados ni en commits de Git (Gobernanza `AGENTS.md`). |
+| **RNF-035** | **Política Zero-PHI (Cero Información Médica Protegida)** | El esquema físico prohíbe atributos de pacientes; auditoría activa para detectar y sancionar inserciones indebidas de historiales clínicos. |
+| **RN-012 / RN-013** | Inmutabilidad hospitalaria y retención legal de 5 años | Revocación terminante del privilegio `DELETE` a la aplicación: `REVOKE DELETE ON ... FROM s3ih_app_user`. Pistas append-only sin `UPDATE`. |
+| **Restricción 5 / D-04** | Almacenamiento seguro desacoplado de evidencias | BD solo gestiona metadatos y hashes SHA-256; archivos fuera del WebRoot en `/var/s3ih/adjuntos/` con permisos POSIX `0640`. |
 
-| Cuenta BD | Rol MySQL | Privilegios | Uso |
-|---|---|---|---|
-| `app_rw` | `rol_app` | SELECT, INSERT, UPDATE en tablas de negocio; INSERT en `core_auditoria`, `inv_movimiento_inventario`, outbox | aplicación (POS/web/API) |
-| `app_read` | `rol_lectura` | SELECT en todas las tablas | reportes/BI (RF-080); candidata a réplica si DB-P07 |
-| `migraciones` | `rol_migracion` | DDL completo sobre el esquema de la app | pipeline de migraciones (DB-P11) |
-| `backup` | `rol_backup` | SELECT + RELOAD, PROCESS, REPLICATION CLIENT, BINLOG MONITOR | mysqldump/PITR |
-| `dba` | `rol_dba` | administración (uso humano, con MFA/SSH bastión si aplica) | operación |
+---
 
-- Auth MySQL: `caching_sha2_password` (default 8.x); **prohibido** `mysql_native_password` en instalaciones nuevas salvo incompatibilidad documentada.
-- Sin cuentas compartidas ni anónimas: revocar `''@'localhost'` y eliminar usuarios por defecto en el checklist de endurecimiento.
-- Passwords de cuentas BD: generados aleatoriamente, rotables, solo en secrets runtime; **nunca** en el repo (RNF-034, AGENTS.md).
-- `root` solo reachable desde red local/contenedor DBA; no desde redes de aplicación.
+## 2. Segregación de Cuentas y Roles de Base de Datos
 
-## 3. Autorización (GRANT) — detalle por capa
+En estricta aplicación del principio de mínimo privilegio, el sistema no utiliza una única cuenta compartida ni se conecta jamás como usuario administrador (`root` o `postgres`):
 
-| Objeto | `rol_app` | `rol_lectura` | Nota |
-|---|---|---|---|
-| tablas `auth_*` | SELECT/INSERT/UPDATE* | SELECT | *UPDATE solo tablas de sesión/roles si la app las gestiona; no `auth_token_blacklist` UPDATE masivo |
-| tablas `core_*`, `cat_*`, `com_*`, `inv_*`, `sales_*`, `pay_*` | SELECT/INSERT/UPDATE | SELECT | DELETE: ver §3.1 |
-| `core_auditoria` | **solo INSERT** | SELECT | RF-090 append-only |
-| `inv_movimiento_inventario` | **solo INSERT** | SELECT | RN-01/RF-090 append-only |
-| `core_outbox` (si existe) | SELECT/INSERT/UPDATE | SELECT | outbox: la app marca procesado (decisión D-04) |
-| column-level | sin acceso a columnas de password hash fuera de módulo auth | — | refuerzo defensivo |
-| `*.*` | **denegado** | — | sin SUPER/PROCESS/GRANT OPTION en app |
+```
++-----------------------------------------------------------------------------------+
+|                            SEGREGACIÓN DE CUENTAS S3IH                           |
++-----------------------------------------------------------------------------------+
+|  [ s3ih_app ]     --> Conexión API / Monolito (SELECT, INSERT, UPDATE - NO DELETE)|
+|  [ s3ih_worker ]  --> Worker asíncrono SLA / Outbox / SMTP (SELECT, UPDATE)       |
+|  [ s3ih_backup ]  --> Tareas de respaldo diario y streaming PITR (SELECT, RELOAD) |
+|  [ s3ih_migrator ]--> Pipeline CI/CD de migraciones de esquema (DDL controlado)   |
+|  [ s3ih_dba ]     --> Administración humana de soporte (Acceso Bastion + MFA)     |
++-----------------------------------------------------------------------------------+
+```
 
-\* DELETE: la app no necesita DELETE a nivel BD en transaccionales (RN-08); si alguna entidad usa soft-delete por `estado` (DB-P12), basta UPDATE. Si una maestra de baja requiere borrado, ese privilegio queda fuera de `rol_app` (operación DBA).
+### Especificación de Cuentas Operativas
 
-**Append-only (cierra decisión Paso 08 §6 — capa GRANT):**
+| Cuenta de Base de Datos | Host de Conexión Autorizado | Rol / Privilegios Asignados | Función Operativa |
+| :--- | :--- | :--- | :--- |
+| **`s3ih_app_user`** | `app.s3ih.internal` (Docker network) | `SELECT, INSERT, UPDATE` condicional en tablas de negocio. **Sin `DELETE`**. | Backend PHP y API REST para tramitación de órdenes hospitalarias. |
+| **`s3ih_worker_user`** | `worker.s3ih.internal` (Docker network) | `SELECT, UPDATE` en `ops_outbox_eventos` y `sol_control_tiempo_sla`. | Proceso daemon desacoplado para evaluación de SLA y SMTP. |
+| **`s3ih_backup_user`** | `localhost` / `backup.s3ih.internal` | `SELECT, RELOAD, PROCESS, REPLICATION CLIENT, LOCK TABLES`. | Volcado lógico diario `mysqldump` / `pg_dump` y streaming de WAL/binlog. |
+| **`s3ih_migrator_user`** | `deploy.s3ih.internal` | DDL sobre esquema `s3ih_db` (`CREATE, ALTER, INDEX`). Solo en despliegues. | Ejecución controlada de migraciones versionadas. |
+| **`s3ih_dba_admin`** | Bastión administrativo exclusivo | Acceso administrativo completo; auditoría individualizada con clave SSH y MFA. | Operación y mantenimiento correctivo por DBA. |
 
-- `rol_app` sobre `core_auditoria` e `inv_movimiento_inventario`: `INSERT` + `SELECT` únicamente.
-- Refuerzo en capa 2: triggers `BEFORE UPDATE/DELETE` → `SIGNAL SQLSTATE` (Paso 13/14). Ambas capas = defensa en profundidad.
-- Decisión consolidada (integridad §6): bloquear UPDATE y DELETE enteros sobre ambas tablas (sin excepción de columnas `user_update*`).
+---
 
-## 4. Cifrado
+## 3. Matriz de Autorización Granular (GRANT / REVOKE)
 
-| Capa | Decisión | Origen |
-|---|---|---|
-| En tránsito | TLS obligatorio: `require_secure_transport=ON`; certificados del contenedor/CA interna o CA de confianza; clientes MySQL con `--ssl-mode=VERIFY_IDENTITY` o equivalente del driver | RNF-032, skill databases (regla 4) |
-| En reposo | **Disco/volumen del host o del volumen Docker** (LUKS/cloud encryption del proveedor de hosting). MySQL 8.x no ofrece TDE nativo open-source → cifrado a nivel de volumen. Si el hosting no lo da, documentar como limitación en Paso 14. | decisión; PCI-like no aplica (no hay PAN almacenado — pagos vía proveedor externo RF-063) |
-| Contraseñas usuarios finales | Argon2id en aplicación; la BD solo ve hashes (§15 decisiones) | RNF-033 |
-| Datos sensibles en columnas | email/identificación en claro son necesarios para operación (UNIQUE, login); no hay token de pago ni CVV en la BD (desacoplado RF-063) | RF-063 |
+### 3.1 Política Terminante de No Borrado (`REVOKE DELETE`)
+Para cumplir las regulaciones de trazabilidad y las reglas **RN-012** y **RN-013**, la cuenta de la aplicación tiene revocados todos los privilegios destructivos:
 
-**Nota pagos:** `pay_transaccion_pago` guarda referencia/idempotency/montos/estado — **no** números de tarjeta completos. Si el proveedor devuelve un PAN tokenizado, solo el token/últimos 4.
+```sql
+-- Revocación global de borrado para la aplicación
+REVOKE DELETE ON *.* FROM 's3ih_app_user'@'%';
+REVOKE DROP, ALTER, TRUNCATE ON *.* FROM 's3ih_app_user'@'%';
+```
 
-## 5. Separación de entornos y redes
+### 3.2 Matriz Granular por Entidad para `s3ih_app_user`
 
-- Dev/test/prod: BDs y usuarios distintos; **nunca** volcados de prod con datos reales sin enmascarar en dev (RNF-034/035 implícito en higiene de datos).
-- Docker Compose (D-06): puerto 3306 publicado solo en entorno dev; en prod, red interna del compose + app y BD en misma red user-defined; sin publish a 0.0.0.0.
-- Backup artifacts: cifrados en destino; credenciales de almacenamiento de backup en secrets.
+| Objeto / Tabla | SELECT | INSERT | UPDATE | DELETE | Justificación de Negocio / Restricción |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| `org_sedes`, `org_servicios` | Sí | No | No | **NO** | Catálogos maestros administrados solo por DBA. |
+| `org_cuadrillas_guardia`, `org_cuadrilla_miembros` | Sí | Sí | Sí | **NO** | Gestión de turnos y rotación técnica 24/7. |
+| `sec_roles` | Sí | No | No | **NO** | Catálogo RBAC inmutable en runtime. |
+| `sec_usuarios` | Sí | Sí | Sí | **NO** | Altas, modificaciones y registro de `ultimo_acceso_at`. |
+| `cat_solicitud_tipos`, `cat_causales` | Sí | No | No | **NO** | Catálogos tipificados de fallas y causales. |
+| `sla_calendarios`, `sla_dias_inhabiles`, `sla_politicas` | Sí | No | No | **NO** | Parámetros de servicio administrados por jefatura. |
+| `sol_solicitudes` | Sí | Sí | Sí* | **NO** | Transacciones operativas. *Campos de creación inmutables. |
+| `sol_control_tiempo_sla` | Sí | Sí | Sí | **NO** | Registro del reloj y pausas de SLA. |
+| `sol_historial_estados` | Sí | Sí | **NO** | **NO** | **Append-only estricto:** Prohibido modificar transiciones pasadas. |
+| `sol_informes_atencion` | Sí | Sí | Sí | **NO** | Registro del cierre técnico del requerimiento. |
+| `sol_reaperturas`, `sol_reasignaciones` | Sí | Sí | **NO** | **NO** | **Append-only estricto:** Pistas de eventos inmutables. |
+| `sol_bitacora` | Sí | Sí | **NO** | **NO** | **Append-only estricto:** Notas técnicas cronológicas. |
+| `sol_adjuntos` | Sí | Sí | **NO** | **NO** | Metadatos y hashes de archivos subidos; no se alteran. |
+| `ops_idempotencia` | Sí | Sí | **NO** | **NO** | Registros de token inalterables; expiran por TTL. |
+| `ops_outbox_eventos` | Sí | Sí | Sí | **NO** | Creación del evento y actualización de estado por worker. |
+| `audit_eventos` | Sí | Sí | **NO** | **NO** | **Pista legal inmutable:** Prohibido `UPDATE` y `DELETE`. |
 
-## 6. Hardening MySQL (config; hereda Paso 06 §5)
+---
 
-Checklist obligatorio al desplegar (skill `databases` Production Checklist MySQL):
+## 4. Cifrado y Protección Criptográfica
 
-- [ ] `sql_mode` incluye `STRICT_TRANS_TABLES` (ON)
-- [ ] `character-set-server=utf8mb4` + `collation-server` coherente
-- [ ] `require_secure_transport=ON` (TLS no opcional)
-- [ ] `default_authentication_plugin` / usuarios con `caching_sha2_password`
-- [ ] sin cuentas por defecto ni passwords de ejemplo
-- [ ] `innodb_buffer_pool_size` ≈ 70% RAM
-- [ ] `innodb_flush_log_at_trx_commit=1`
-- [ ] `innodb_file_per_table=ON`
-- [ ] `log_bin=ON` (PITR — RNF-040/041, DB-P05)
-- [ ] `max_connections` dimensionado; pool de app ≤ `max_connections` (considerar ProxySQL si multi-instancia app)
-- [ ]慢 query log / `long_query_time` operativo
-- [ ] patches de motor LTS al día (MySQL 8.4.x actual; verificar CVE del mes antes de cada upgrade)
+### 4.1 Cifrado en Tránsito (Network Security)
+1. **Configuración del Servidor:**
+   - En MySQL 8.x: `require_secure_transport = ON`.
+   - En PostgreSQL 16+: `ssl = on`, `ssl_min_protocol_version = 'TLSv1.2'`.
+   - Certificados X.509 emitidos por la Autoridad Certificadora (CA) interna de la red de salud.
+2. **Configuración del Cliente PHP PDO:**
+   ```php
+   $pdoOptions = [
+       PDO::MYSQL_ATTR_SSL_CA => '/etc/ssl/certs/hospital_internal_ca.pem',
+       PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => true,
+       PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+       PDO::ATTR_EMULATE_PREPARES => false, // Prevención nativa de SQL Injection
+   ];
+   ```
 
-## 7. Protección anti-inyección y manejo de datos (límite app ↔ BD)
+### 4.2 Cifrado en Reposo (Storage Security)
+1. **Volumen de Base de Datos:**
+   - Encriptación completa de partición mediante **LUKS (dm-crypt)** con algoritmo `AES-XTS-PLAIN64` y clave de 512 bits en el servidor host Linux.
+2. **Archivos de Evidencias Técnicas (`/var/s3ih/adjuntos/`):**
+   - Volumen dedicado montado con cifrado a nivel de bloque para garantizar confidencialidad física ante sustracción de discos.
 
-- Toda consulta **parametrizada** (skill databases regla 9; RNF-035): la BD recibe placeholders; el driver no concatena.
-- Sin DDL/DCL dinámico desde la app (`rol_app` sin privilegios de ejecución de DDL lo refuerza).
-- Exportes/volcados: sin secretos; rotación de passwords de BD tras cualquier fuga de artefacto (protocolo seguridad INSTRUCTIONS.md).
-- Retención: `core_idempotency_key` / `auth_token_blacklist` con purga según política (30 días idempotencia — D-03); purga = operación DBA/app con privilegio puntual, no DELETE libre.
+### 4.3 Criptografía de Auditoría Encadenada (No Repudio)
+- En la tabla `audit_eventos`, cada registro incorpora la columna `hash_encadenado_sha256`:
+  $$\text{Hash}_i = \text{SHA256}(\text{Hash}_{i-1} \parallel \text{id} \parallel \text{usuario\_id} \parallel \text{accion} \parallel \text{registro\_id} \parallel \text{datos\_nuevos\_json} \parallel \text{created\_at\_utc})$$
+- Cualquier intento indebido de alterar un registro histórico rompe matemáticamente la cadena de custodia, garantizando no repudio judicial en auditorías hospitalarias.
 
-## 8. Mapping pendientes (no inventar respuestas)
+---
 
-| Pendiente | Impacto en seguridad |
-|---|---|
-| DB-P05 RPO/RTO finales | define frecuencia de backup/binlog y drills de restore (skill: restore sin prueba = no es backup) |
-| DB-P07 réplica lectura | si aplica: `rol_lectura` apunta a réplica; separar usuario de réplicación |
-| DB-P11 herramienta de migraciones | quién usa `rol_migracion` y cómo se inyecta el secret |
-| DB-P08 identificación cliente | si se almacena identificación, evaluar minimización/exposición en consultas |
-| DB-P09 precio global vs sucursal | no afecta seguridad directamente; riesgo de rediseño (Paso 14) |
+## 5. Prevención de Inyección SQL y Seguridad en Consultas
 
-## 9. Criterios de salida
+En cumplimiento de las buenas prácticas del skill `databases`:
 
-- [x] RNF-030…035 y RF-001/090 trazados a controles concretos (§1).
-- [x] Mínimo privilegio: roles BD separados; app sin DDL ni DELETE en append-only (§2–§3).
-- [x] Append-only: GRANT INSERT-only en `core_auditoria` + `inv_movimiento_inventario` (decisión Paso 08 §6 cerrada en capa GRANT).
-- [x] TLS forzado + Argon2id app + secretos fuera del repo (§4).
-- [x] Hardening MySQL alineado con Paso 06 y skill `databases` (§6).
-- [x] Sin credenciales reales ni SQL de migración en el artefacto.
-- [x] Pendientes DB-P* marcados sin inventar (§8).
+1. **Consultas Estrictamente Parametrizadas:**
+   - Queda terminantemente prohibida la concatenación de variables en cadenas SQL:
+     ```php
+     // CORRECTO: Parámetros vinculados (evita SQL Injection)
+     $stmt = $pdo->prepare('SELECT * FROM sol_solicitudes WHERE codigo_correlativo = :codigo');
+     $stmt->execute([':codigo' => $codigo]);
+     ```
+2. **Desactivación de Emulación de Preparadas:**
+   - `PDO::ATTR_EMULATE_PREPARES = false`: Obliga al motor a utilizar el protocolo binario real de sentencias preparadas, imposibilitando inyecciones por manipulación de juegos de caracteres.
 
-**Estado:** Paso 09 COMPLETADO → siguiente: Paso 10 (`08_auditoria/auditoria.md` + `09_versionamiento/versionamiento.md`).
+---
+
+## 6. Seguridad en el Almacenamiento de Evidencias Técnicas (Restricción 5, D-04)
+
+Los archivos adjuntos constituyen un vector crítico de ataque (cargas maliciosas, web shells). Se implementa una **defensa en 6 capas**:
+
+1. **Ubicación Externa:** Los archivos físicos se almacenan en `/var/s3ih/adjuntos/`, ruta estrictamente fuera del directorio raíz web (`DocumentRoot`), haciendo imposible su ejecución HTTP directa.
+2. **Ofuscación de Nombres:** El nombre físico es un UUID v4 (`uuid_almacenamiento.ext`), desvinculando la ruta física del nombre original subido por el usuario.
+3. **Validación de Magic Numbers:** La aplicación no confía en la cabecera `Content-Type` ni en la extensión provista por el navegador; inspecciona los primeros bytes del archivo (magic numbers) mediante `finfo_file()`.
+4. **Lista Blanca Estricta:** Solo se aceptan extensiones seguras: `pdf`, `jpg`, `jpeg`, `png`. Todo archivo ejecutable (`.exe`, `.php`, `.sh`, `.bat`) se rechaza de inmediato.
+5. **Límite Físico y de BD:** Límite máximo de $5.242.880\text{ bytes}$ (5 MB) controlado en `php.ini`, Nginx (`client_max_body_size 5M`) y constraint `CHECK` en `sol_adjuntos`.
+6. **Permisos POSIX:** Permisos `0640` (lectura/escritura para el servicio, sin permiso de ejecución `chmod -x`).
+
+---
+
+## 7. Aislamiento de Red y Endurecimiento del Servidor de Base de Datos
+
+Siguiendo el checklist de producción del skill `databases`:
+
+```
++---------------------------------------------------------------------------------+
+|                       TOPOLOGÍA DE RED Y FIREWALL S3IH                          |
++---------------------------------------------------------------------------------+
+|                                                                                 |
+|   RED EXTERNA / INTERNET:   [ DENEGADO ACCESO A PUERTOS 3306 / 5432 ]           |
+|                                     │                                           |
+|                                     ▼                                           |
+|   RED DMZ / HOSPITALES:      Nginx Reverse Proxy (HTTPS :443)                   |
+|                                     │                                           |
+|                                     ▼ (Red Docker Interna 'backend-net')        |
+|   RED PRIVADA APLICACIÓN:    PHP Monolito & Worker                              |
+|                                     │                                           |
+|                                     ▼ (Red Docker Interna 'db-net')             |
+|   RED PRIVADA BASE DATOS:    MySQL / PostgreSQL (:3306/:5432 en 127.0.0.1)      |
+|                                                                                 |
++---------------------------------------------------------------------------------+
+```
+
+1. **Sin Exposición Pública:** Los puertos de base de datos (`3306` / `5432`) no se mapean al host en entornos productivos (`ports: - "127.0.0.1:3306:3306"` o comunicación interna de Docker Network).
+2. **Eliminación de Cuentas por Defecto:**
+   - Eliminación de bases de datos de prueba (`test`).
+   - Revocación de usuarios anónimos (`DELETE FROM mysql.user WHERE User='';`).
+   - Inhabilitación de login remoto directo para la cuenta `root`.
+3. **Protección contra Fuerza Bruta:** Bloqueo de IP tras 5 intentos fallidos consecutivos de autenticación y timeout estricto de conexión inactiva.
+
+---
+
+## 8. Cumplimiento de la Política Zero-PHI (RNF-035)
+
+- **Auditoría Preventiva de Campos de Texto:**  
+  La columna `descripcion_falla` en `sol_solicitudes` y `diagnostico_falla` en `sol_informes_atencion` incorporan validación por expresiones regulares en la capa de servicio para detectar y rechazar patrones compatibles con identificaciones personales o números de historia clínica (*Zero-PHI Guard*).
+- **Compromiso en Capa de Datos:**  
+  El diseño físico no almacena datos de pacientes, manteniendo el sistema estrictamente enfocado en la infraestructura locativa y médica hospitalaria.
+
+---
+
+## 9. Conclusión y Resumen de Estado
+
+| Control de Seguridad | Estado | Mecanismo de Implementación |
+| :--- | :---: | :--- |
+| **Mínimo Privilegio (PoLP)** | **APROBADO** | Cuentas de motor segregadas (`app`, `worker`, `backup`, `migrator`). |
+| **Inmutabilidad y No Borrado** | **APROBADO** | `REVOKE DELETE` global a la aplicación y tablas append-only. |
+| **Cifrado en Tránsito** | **APROBADO** | TLS 1.3 / 1.2 obligatorio en conexiones cliente-servidor. |
+| **Cifrado en Reposo** | **APROBADO** | LUKS / TDE y almacenamiento desacoplado protegido en 6 capas. |
+| **No Repudio y Pista Legal** | **APROBADO** | Pista de auditoría con encadenamiento criptográfico SHA-256 por 5 años. |
+| **Aislamiento de Red** | **APROBADO** | Red privada interna Docker sin exposición a Internet. |
+| **Zero-PHI** | **APROBADO** | Ausencia total de datos clínicos protegidos en el esquema. |
+
+---
+
+**Estado del Paso:** Paso 09 COMPLETADO con éxito.  
+**Siguiente Paso:** Paso 10 — Auditoría, Histórico y Versionamiento (`proyecto/05_base_datos/08_auditoria/auditoria.md` y `09_versionamiento/versionamiento.md`), utilizando `database-schema-designer` y `databases`.

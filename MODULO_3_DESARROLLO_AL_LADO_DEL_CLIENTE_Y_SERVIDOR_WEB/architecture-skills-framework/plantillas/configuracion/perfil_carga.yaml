@@ -1,7 +1,35 @@
-transacciones_negocio_por_hora_objetivo: 1000
-multiplicador_pico: 2.0
+# Perfil de carga y dimensionamiento operativo
+# Sistema de seguimiento de solicitudes internas hospitalarias (Red de hasta 4 hospitales)
+
+transacciones_negocio_por_hora_objetivo: 3000
+multiplicador_pico: 3.0
 factor_crecimiento_a_evaluar: 10
-usuarios_concurrentes_estimados: null
-disponibilidad_objetivo_porcentaje: null
-rpo_minutos: null
-rto_minutos: null
+usuarios_concurrentes_estimados: 700
+disponibilidad_objetivo_porcentaje: 99.9
+rpo_minutos: 60
+rto_minutos: 180
+
+# Dimensionamiento de la red hospitalaria
+red_hospitalaria:
+  maximo_hospitales: 4
+  hospitales_iniciales_activos: 2
+  servicios_promedio_por_hospital: 20
+  usuarios_asistenciales_concurrentes: 500
+  usuarios_tecnicos_concurrentes: 200
+
+# Umbrales de latencia objetivo (percentil 95 en milisegundos)
+umbrales_latencia_p95_milisegundos:
+  consulta_bandeja_solicitudes: 400
+  detalle_solicitud_historial: 500
+  radicacion_y_transicion_estado: 800
+  carga_archivos_adjuntos: 2000
+
+# Parámetros y cuotas de evidencias técnicas adjuntas
+limites_adjuntos:
+  tamano_maximo_mb_por_archivo: 5
+  maximo_archivos_por_solicitud: 5
+  formatos_permitidos:
+    - "pdf"
+    - "jpg"
+    - "jpeg"
+    - "png"

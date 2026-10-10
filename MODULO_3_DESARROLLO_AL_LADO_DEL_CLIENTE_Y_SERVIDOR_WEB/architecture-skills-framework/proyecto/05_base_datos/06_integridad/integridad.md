@@ -1,126 +1,178 @@
-# Paso 08 — Integridad
+# Paso 08 — Integridad Referencial, de Dominio y Reglas de Negocio (S3IH)
 
-**Workflow:** 02_database_workflow — Paso 08
-**Skill utilizado:** `database-schema-designer`
-**Entrada:** `05_modelo_fisico/modelo_fisico.md`, `03_modelo_logico/modelo_logico.md`
-**Objetivo:** política de integridad referencial, de dominio y de negocio; sin SQL de migración.
+**Workflow:** `02_database_workflow` — Paso 08  
+**Skills utilizados:** `database-schema-designer`, `databases` (instalados en `.agents/skills/`)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red de 4 hospitales)  
+**Entradas:**  
+- `proyecto/05_base_datos/05_modelo_fisico/modelo_fisico.md`  
+- `proyecto/05_base_datos/03_modelo_logico/modelo_logico.md`  
+- `proyecto/00_contexto/reglas_negocio.md`  
+- `proyecto/01_requisitos/criterios_aceptacion.md`  
+- `proyecto/04_decisiones/decisiones_base_datos.md`  
 
-## 1. Capas de integridad
+**Objetivo:** Formalizar la arquitectura de integridad en 5 niveles para el motor relacional hospitalario, definiendo constraints declarativos de base de datos, políticas referenciales ante eventos de borrado/actualización, reglas de chequeo de dominio y mecanismos de validación de reglas de negocio críticas sin ambigüedades.
 
-| Capa | Mecanismo | Cuándo |
-|---|---|---|
-| Dominio | tipos (`DECIMAL(12,2)`, `INT UNSIGNED`), `NOT NULL`, `CHECK` | toda fila |
-| Referencial | `FOREIGN KEY` + `ON DELETE` | toda relación |
-| Única | `UNIQUE` (explícita o PK) | claves naturales y de negocio |
-| Transaccional | ACID InnoDB, `START TRANSACTION … COMMIT` | escrituras multi-tabla |
-| Aplicación | validaciones de negocio (RN) | antes/tras la transacción |
+---
 
-**Regla:** la app no sustituye a la BD en lo que la BD puede garantizar (tipos, unicidad, FK, CHECK).
+## 1. Arquitectura de Integridad en 5 Niveles
 
-## 2. Integridad de dominio (resumen; detalle en modelo_fisico)
+El principio arquitectónico rector establece que **la aplicación jamás sustituye a la base de datos en las garantías que el motor relacional puede asegurar por diseño** (integridad declarativa primero):
 
-- Dinero: `DECIMAL(12,2)`; `monto/total/subtotal/precio >= 0` (CHECK); `pago.monto > 0`.
-- Cantidades/stock: `INT UNSIGNED`; ítems `> 0`; `inv_movimiento_inventario.cantidad <> 0`; stock `>= 0`.
-- Fechas: `DATETIME` (UTC por app).
-- Cadenas: `VARCHAR(n)` con `n` acotado (email 254, sku 64, clave 80, correlación 64).
+| Nivel de Integridad | Mecanismo de Implementación | Ámbito de Ejecución | Justificación en S3IH |
+| :--- | :--- | :--- | :--- |
+| **1. Dominio** | Tipos de datos estrictos, `NOT NULL`, constraints `CHECK`, `DEFAULT` | Cada columna y fila individual | Prevenir inconsistencias tipográficas, desbordamientos numéricos y datos vacíos. |
+| **2. Unicidad** | `PRIMARY KEY`, restricciones e índices `UNIQUE` | Tablas individuales | Evitar duplicación de códigos institucionales, usuarios y tokens de idempotencia. |
+| **3. Referencial** | `FOREIGN KEY` con cláusulas `ON DELETE` / `ON UPDATE` | Relaciones inter-tabla | Mantener coherencia jerárquica hospitalaria e impedir orfandad de registros. |
+| **4. Transaccional (ACID)**| Transacciones `START TRANSACTION ... COMMIT`, bloqueos por fila, bloqueo optimista (`version`) | Operaciones compuestas multi-tabla | Atomicidad indisoluble en transiciones de estado, outbox y cómputo de SLA. |
+| **5. Reglas de Negocio** | Validaciones en transacciones ACID + triggers / constraints compuestos | Flujo de negocio hospitalario | Cumplimiento estricto de la máquina de estados, no repudio y política Zero-PHI. |
 
-## 3. Integridad referencial (FK → `ON DELETE`)
+---
 
-**Política general:** `ON DELETE RESTRICT` en todo el modelo. Motivo: RN-08 prohíbe borrado físico de transaccionales; las maestras no deben borrarse si tienen historial. Ninguna FK usa `CASCADE` de borrado.
+## 2. Integridad de Dominio: Especificación de Constraints `CHECK` y `NOT NULL`
 
-| Hijos → Padres | ON DELETE | Razón |
-|---|---|---|
-| detalle → orden/OC/recepción/transferencia | RESTRICT | histórico inmutable |
-| línea → producto/categoría/sucursal/proveedor/cliente | RESTRICT | no romper reportes |
-| inventario → producto/sucursal | RESTRICT | stock referencial |
-| auditoría/movimiento → usuario | RESTRICT | trazabilidad |
-| carrito → cliente | RESTRICT | cliente no se borra; se inactiva |
-| `cat_categoria.categoria_padre_id` | RESTRICT + CHECK no self | jerarquía sin ciclos auto (ciclos profundos: ver §5) |
+Todas las columnas obligatorias cuentan con `NOT NULL`. A continuación se especifican las restricciones lógicas de dominio formalizadas en el motor:
 
-`cliente_id` en POS es nullable → `ON DELETE RESTRICT` sobre FK nullable aún aplica si existe fila; no se usa `SET NULL` porque el historial de ventas exige conservar la referencia (RN-08/RF-090).
+| Tabla | Columna / Restricción | Definición de Constraint `CHECK` | Fundamento / Regla de Negocio |
+| :--- | :--- | :--- | :--- |
+| `org_sedes` | `estado` | `CHECK (estado IN ('activo', 'inactivo'))` | Catálogo maestro hospitalario. |
+| `org_servicios` | `tipo_servicio` | `CHECK (tipo_servicio IN ('ASISTENCIAL', 'RESOLUTOR'))` | RF-002: Distinción entre áreas clínicas y unidades técnicas de soporte. |
+| `org_servicios` | `estado` | `CHECK (estado IN ('activo', 'inactivo'))` | Inactivación lógica en lugar de borrado físico. |
+| `org_cuadrillas_guardia`| `turno_codigo` | `CHECK (turno_codigo IN ('MANANA', 'TARDE', 'NOCHE', 'GUARDIA_24H'))` | RF-004: Cobertura operativa continua en turnos rotativos. |
+| `sec_usuarios` | `estado` | `CHECK (estado IN ('activo', 'inactivo'))` | Gestión de altas/bajas de personal médico y técnico. |
+| `cat_solicitud_tipos` | `prioridad_sugerida` | `CHECK (prioridad_sugerida IN ('VITAL', 'ALTA', 'MEDIA', 'BAJA'))` | RF-010: Clasificación tipificada estandarizada. |
+| `cat_causales` | `tipo_causal` | `CHECK (tipo_causal IN ('SUSPENSION_ESPERA', 'RECHAZO_TECNICO', 'CANCELACION_USUARIO', 'REAPERTURA'))` | RF-014: Justificaciones catalogadas mandatorias. |
+| `sla_calendarios` | `codigo_calendario`| `CHECK (codigo_calendario IN ('CONTINUO_24_7', 'HABIL_ADMINISTRATIVO'))` | RF-013: Dualidad de cálculo de SLA (24/7 vs hábil). |
+| `sla_politicas` | `prioridad_asistencial` | `CHECK (prioridad_asistencial IN ('VITAL', 'ALTA', 'MEDIA', 'BAJA'))` | RF-011: Matriz de tiempos MTTA/MTTR. |
+| `sla_politicas` | `tiempo_max_respuesta_mtta_min`| `CHECK (tiempo_max_respuesta_mtta_min > 0)` | Plazos de primera respuesta obligatoriamente positivos. |
+| `sla_politicas` | `tiempo_max_resolucion_mttr_min`| `CHECK (tiempo_max_resolucion_mttr_min > 0)` | Plazos de resolución final obligatoriamente positivos. |
+| `sol_solicitudes` | `prioridad_asistencial` | `CHECK (prioridad_asistencial IN ('VITAL', 'ALTA', 'MEDIA', 'BAJA'))` | RF-020: Nivel de criticidad clínica asignado. |
+| `sol_solicitudes` | `estado` | `CHECK (estado IN ('Registrada', 'Asignada', 'En Proceso', 'En Espera', 'Atendida', 'Cerrada', 'Rechazada', 'Cancelada'))` | RN-005: Estados válidos y cerrados de la máquina de estados. |
+| `sol_solicitudes` | `version` | `CHECK (version >= 1)` | D-01: Contador de concurrencia optimista. |
+| `sol_historial_estados` | `estado_anterior`, `estado_nuevo` | `CHECK (estado_anterior IN (...) AND estado_nuevo IN (...))` | Inmutabilidad de la traza de transiciones. |
+| `sol_informes_atencion` | `tiempo_real_minutos` | `CHECK (tiempo_real_minutos > 0)` | RF-044, RN-007: Dedicación técnica real obligatoria. |
+| `sol_bitacora` | `tipo_entrada` | `CHECK (tipo_entrada IN ('NOTA_TECNICA', 'CAMBIO_GUARDIA', 'PIEZA_SOLICITADA', 'COMUNICACION'))` | RF-060: Clasificación de notas cronológicas. |
+| `sol_adjuntos` | `extension` | `CHECK (extension IN ('pdf', 'jpg', 'jpeg', 'png'))` | Restricción Técnica 5: Formatos seguros autorizados. |
+| `sol_adjuntos` | `tamano_bytes` | `CHECK (tamano_bytes > 0 AND tamano_bytes <= 5242880)` | Restricción Técnica 5, D-04: Límite estricto de 5 MB por archivo. |
+| `ops_outbox_eventos` | `tipo_evento` | `CHECK (tipo_evento IN ('ALERTA_SLA_75', 'ESCALAMIENTO_SLA_100', 'DESPACHO_EMAIL_SMTP', 'AUTO_CIERRE_48H'))` | D-06: Eventos asíncronos autorizados para el worker. |
+| `ops_outbox_eventos` | `estado` | `CHECK (estado IN ('PENDIENTE', 'PROCESANDO', 'ENVIADO', 'FALLIDO'))` | Ciclo de vida de entrega outbox. |
 
-## 4. Integridad única (UNIQUE / PK)
+---
 
-| Tabla | Restricción única | RN/RF |
-|---|---|---|
-| auth_usuario | email | RF-001 |
-| auth_rol | nombre | — |
-| auth_permiso | codigo | — |
-| auth_usuario_rol | (usuario_id, rol_id) PK | — |
-| auth_rol_permiso | (rol_id, permiso_id) PK | — |
-| auth_token_blacklist | token_hash | §15 |
-| core_caja_pos | (sucursal_id, codigo) | RF-010 |
-| core_cliente | identificacion (nullable) | DB-P08 |
-| cat_producto | sku | RF-020 |
-| cat_precio | (sucursal_id, producto_id, vigente_desde) | DB-P09 cerrado: precios por sucursal (2026-09-22) |
-| com_producto_promocion | (producto_id, promocion_id) PK | — |
-| com_proveedor | nombre; codigo (nullable) | — |
-| com_orden_compra | numero | RF-030 |
-| com_orden_compra_item | (orden_id, producto_id) | RN-05 |
-| inv_inventario | (producto_id, sucursal_id) | RF-040 |
-| inv_transferencia_item | (transferencia_id, producto_id) | RN-06 |
-| sales_orden_venta | numero; idempotency_key (nullable→web NOT NULL en app) | RN-07 |
-| sales_orden_venta_item | (orden_id, producto_id) | RF-050 |
-| sales_carrito_web | sesion_key | carrito persiste en BD (confirmado 2026-09-22) |
-| sales_carrito_web_item | (carrito_id, producto_id) | — |
-| pay_transaccion_pago | idempotency_key; (proveedor_pago, referencia_externa) | D-03, RF-063 |
-| core_configuracion | clave | RF-100 |
-| core_idempotency_key | key PK | D-03 |
+## 3. Integridad Referencial: Matriz de Claves Foráneas y Acciones ante Eliminación/Actualización
 
-**Nota MySQL:** `UNIQUE` permite múltiples `NULL`. Donde el NULL debe ser único-solo-uno (p.ej. `core_cliente.identificacion` si solo un cliente sin ID), usar `UNIQUE` + `CHECK (identificacion IS NOT NULL)` o app. `idempotency_key` nullable en POS: la app rellena en web; unicidad garantizada cuando existe.
+En estricta conformidad con **RN-012** y **RN-013** (inmutabilidad y prohibición de borrado físico en salud), la política referencial del sistema hospitalario es **cero borrado en cascada (`ON DELETE CASCADE` terminantemente prohibido)**:
 
-## 5. Integridad de dominio de negocio (reglas RN → restricción)
+| Tabla Origen | Clave Foránea (FK) | Tabla Destino | Acción ON DELETE | Acción ON UPDATE | Justificación Hospitalaria y Trazabilidad |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| `org_servicios` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | No se puede eliminar una sede hospitalaria si tiene servicios médicos adscritos. |
+| `org_cuadrillas_guardia` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | Integridad de sede. |
+| `org_cuadrillas_guardia` | `servicio_resolutor_id` | `org_servicios` | `RESTRICT` | `CASCADE` | La cuadrilla técnica pertenece a un servicio resolutor válido. |
+| `org_cuadrilla_miembros` | `cuadrilla_id` | `org_cuadrillas_guardia` | `RESTRICT` | `CASCADE` | Miembros atados a la cuadrilla de guardia. |
+| `org_cuadrilla_miembros` | `usuario_id` | `sec_usuarios` | `RESTRICT` | `CASCADE` | No se borran técnicos con historial de guardia. |
+| `sec_usuarios` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | Un usuario pertenece a un hospital real. |
+| `sec_usuarios` | `servicio_id` | `org_servicios` | `RESTRICT` | `CASCADE` | El usuario pertenece a un servicio asistencial o técnico. |
+| `sec_usuarios` | `rol_codigo` | `sec_roles` | `RESTRICT` | `CASCADE` | El rol de seguridad RBAC debe existir formalmente. |
+| `cat_solicitud_tipos` | `servicio_resolutor_id` | `org_servicios` | `RESTRICT` | `CASCADE` | La especialidad de la falla pertenece a un área técnica real. |
+| `sla_dias_inhabiles` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | El día feriado local pertenece a una sede hospitalaria. |
+| `sla_politicas` | `tipo_solicitud_id` | `cat_solicitud_tipos` | `RESTRICT` | `CASCADE` | Política de SLA ligada al catálogo de fallas. |
+| `sla_politicas` | `calendario_codigo` | `sla_calendarios` | `RESTRICT` | `CASCADE` | Horario de cómputo (24/7 vs hábil) mandatorio. |
+| `sol_solicitudes` | `sede_id` | `org_sedes` | `RESTRICT` | `CASCADE` | La sede generadora es inmutable. |
+| `sol_solicitudes` | `servicio_solicitante_id` | `org_servicios` | `RESTRICT` | `CASCADE` | Servicio asistencial solicitante obligatorio. |
+| `sol_solicitudes` | `servicio_resolutor_id` | `org_servicios` | `RESTRICT` | `CASCADE` | Servicio técnico resolutor obligatorio. |
+| `sol_solicitudes` | `tipo_solicitud_id` | `cat_solicitud_tipos` | `RESTRICT` | `CASCADE` | Tipo de requerimiento tipificado. |
+| `sol_solicitudes` | `usuario_solicitante_id` | `sec_usuarios` | `RESTRICT` | `CASCADE` | Autor de radicación inmutable para no repudio (RF-072). |
+| `sol_solicitudes` | `tecnico_asignado_id` | `sec_usuarios` | **`SET NULL`** | `CASCADE` | **Excepción justificada:** Si un técnico se desvincula o reasigna, la solicitud no se destruye; queda sin asignar para intervención de la jefatura. |
+| `sol_solicitudes` | `cuadrilla_asignada_id` | `org_cuadrillas_guardia` | `RESTRICT` | `CASCADE` | Cuadrilla de guardia de turno. |
+| `sol_control_tiempo_sla`| `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Relación 1:1; el reloj de SLA no puede existir sin solicitud. |
+| `sol_historial_estados` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Inmutabilidad de la pista de auditoría. |
+| `sol_historial_estados` | `causal_codigo` | `cat_causales` | `RESTRICT` | `CASCADE` | Causal estandarizada obligatoria si aplica. |
+| `sol_informes_atencion` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Informe técnico indisoluble de la orden de trabajo. |
+| `sol_reaperturas` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Pista inmutable de reapertura. |
+| `sol_reasignaciones` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Pista inmutable de cambios de asignación. |
+| `sol_bitacora` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Bitácora técnica append-only. |
+| `sol_adjuntos` | `solicitud_id` | `sol_solicitudes` | `RESTRICT` | `CASCADE` | Los metadatos del archivo adjunto no se borran. |
+| `ops_idempotencia` | `usuario_id` | `sec_usuarios` | `RESTRICT` | `CASCADE` | Usuario emisor de la petición HTTP. |
 
-| RN/RF | Regla | Garantía |
-|---|---|---|
-| RN-01 | movimiento de stock siempre ligado a inventario/producto/sucursal/usuario | FK NOT NULL |
-| RN-02 | `stock_available >= 0`, reservas no cubren stock | CHECK + lógica transaccional (Paso 12) |
-| RN-03 | reserva expira a los 15 min | `expira_en` + job (Paso 12/13); TTL fijo `reserva_ttl_minutos=15` en `core_configuracion`; CHECK no implica expiración |
-| RN-04 | ajuste con motivo y usuario | `motivo TEXT NOT NULL`, `usuario_id NOT NULL` |
-| RN-05 | solo recepción `confirmada` mueve inventario | estado ENUM + app (transacción Paso 12) |
-| RN-06 | transferencia origen ≠ destino | CHECK `sucursal_origen_id <> sucursal_destino_id` |
-| RN-07 | idempotencia web/pago | UNIQUE `idempotency_key`; app garantiza NOT NULL en web |
-| RN-08 | sin UPDATE/DELETE de negocio en transaccionales; devolución crea registro nuevo | app + `RESTRICT`; triggers de protección: ver §6 |
-| RF-090 | auditoría append-only | `core_auditoria`: solo INSERT (§6) |
-| jerarquía categorías | sin self-FK | CHECK `categoria_padre_id <> id`; ciclos A→B→A: app (ver §5.1) |
+---
 
-### 5.1 Ciclos en jerarquía de categorías
-CHECK solo evita self-loop. Un ciclo largo (A→B→A) no es detectable con CHECK simple. **Decisión:** app valida al re-parent (máx. profundidad N=5, camino ascendente). Documentado como límite de integridad delegado a app (no bloqueante).
+## 4. Integridad de Unicidad (Claves Primarias y Restricciones `UNIQUE`)
 
-## 6. Protección de tablas inmutables (append-only)
+| Tabla | Restricción / Columnas | Propósito de Negocio | RNF / RF |
+| :--- | :--- | :--- | :--- |
+| `org_sedes` | `UNIQUE (codigo_institucional)` | Prefijo institucional único (`H1`, `H2`, `H3`, `H4`). | RF-001 |
+| `org_servicios` | `UNIQUE (sede_id, codigo)` | Código de área único dentro del mismo centro hospitalario. | RF-002 |
+| `sec_usuarios` | `UNIQUE (username_ldap)` | Cuenta de red corporativa unívoca en Directorio Activo. | RF-003, RNF-030 |
+| `sec_usuarios` | `UNIQUE (email_corporativo)` | Dirección de correo única para notificaciones institucionales. | RF-003 |
+| `cat_solicitud_tipos` | `UNIQUE (servicio_resolutor_id, codigo_tipo)` | Código de falla único por especialidad técnica. | RF-010 |
+| `sla_dias_inhabiles` | `UNIQUE (fecha, sede_id)` | Impedir duplicación de feriados locales en el mismo hospital. | RF-013 |
+| `sla_politicas` | `UNIQUE (tipo_solicitud_id, prioridad_asistencial)` | Matriz unívoca de plazos de respuesta por tipo y criticidad. | RF-011 |
+| `sol_solicitudes` | `UNIQUE (codigo_correlativo)` | Formato oficial inmutable `H{sede}-{año}-{secuencial}`. | RN-001, CA-001 |
+| `sol_adjuntos` | `UNIQUE (uuid_almacenamiento)` | Nombre físico ofuscado (UUID v4) irrepetible en almacenamiento. | D-04, RNF-034 |
+| `ops_idempotencia` | `PRIMARY KEY (idempotency_key)` | Token UUID v4 irrepetible dentro de la ventana TTL de 24 horas. | RN-011, D-03 |
 
-Append-only exigido: `inv_movimiento_inventario` (RN-01/RF-090), `core_auditoria` (RF-090). Opciones en MySQL:
+---
 
-| Opción | Elegida | Razón |
-|---|---|---|
-| Trigger `BEFORE UPDATE/DELETE` → `SIGNAL SQLSTATE` | **sí (Paso 13/14)** | refuerzo a nivel BD; app no es la única capa |
-| GRANT sin UPDATE/DELETE al usuario de app | **sí (Paso 09)** | mínimo privilegio |
-| Solo app | no | insuficiente para RNF de auditoría |
+## 5. Implementación de Reglas de Negocio en la Capa Transaccional
 
-Nota: columnas de auditoría estándar (`user_update`, `user_update_at`) existen en estas tablas por convención de modelo; en append-only **no deben mutarse** — el trigger impide UPDATE completo. Declarar excepción: si se permite solo tocar `user_update*`, el trigger debe filtrar columnas; **decisión simplificada:** bloquear UPDATE y DELETE enteros sobre ambas tablas (el INSERT ya lleva `user_create*`).
+A continuación se detalla cómo se garantiza cada regla de negocio crítica mediante transacciones atómicas y restricciones de base de datos:
 
-## 7. Integridad de transacciones (referencia; detalle Paso 12)
+### RN-001: Formato y Unicidad del Correlativo
+- **Regla:** Formato estricto `H{sede}-{año}-{secuencial}` (ej. `H1-2026-000452`).
+- **Mecanismo:** Índice `UNIQUE (codigo_correlativo)` en `sol_solicitudes`. Generación transaccional protegida mediante secuencia atómica por sede y año dentro de la transacción de radicación (`START TRANSACTION ... COMMIT`).
 
-- Escrituras multi-tabla (venta + ítems + stock + outbox + pago) → **una transacción InnoDB**.
-- Deadlocks → retry acotado con rollback completo (Patrón mysql-patterns).
-- Orden determinado de locks de fila (producto/inventario por id ASC).
+### RN-002: Inmutabilidad de Radicación
+- **Regla:** Una vez radicada la solicitud, la sede generadora, el servicio clínico solicitante y el usuario emisor son inmodificables.
+- **Mecanismo:** La capa de persistencia excluye `sede_id`, `servicio_solicitante_id` y `usuario_solicitante_id` de cualquier sentencia `UPDATE`. Solo se permite alterar estados, asignación técnica y campos de cierre.
 
-## 8. Huecos / pendientes heredados (no resueltos aquí)
+### RN-003 y RN-008: Asignación y Reasignación de Guardias
+- **Regla:** Una solicitud en estado `Asignada` o `En Proceso` debe contar obligatoriamente con `tecnico_asignado_id` o `cuadrilla_asignada_id`. Si se reasigna, debe registrarse el motivo y el supervisor en `sol_reasignaciones`.
+- **Mecanismo:** La transacción de reasignación actualiza atómicamente la orden con bloqueo optimista (`version = version + 1`) e inserta simultáneamente la fila en `sol_reasignaciones`.
 
-- **DB-P08** cliente: ¿identificación obligatoria en POS? UNIQUE parcial depende de decisión.
-- ~~**DB-P09** precio global vs por sucursal~~ → **CERRADO 2026-09-22**: precio por sucursal; `cat_precio` con `sucursal_id NOT NULL`, UNIQUE `(sucursal_id, producto_id, vigente_desde)` ya aplicado en modelo.
-- ~~**DB-P01/P02** reserva~~ → **CERRADOS 2026-09-22**: reserva web bloquea stock POS; TTL 15 min con job `SKIP LOCKED` (detalle Paso 12).
-- **DB-P12** soft-delete: políticas de `estado` por entidad aún abiertas.
-- TTL de purga de carrito (RF-060 no lo define) — no inventar.
+### RN-005: Máquina de Estados Finita Determinista
+- **Regla:** Transiciones unidireccionales válidas:
+  - `Registrada` $\rightarrow$ `Asignada` $\mid$ `Rechazada` $\mid$ `Cancelada`
+  - `Asignada` $\rightarrow$ `En Proceso` $\mid$ `Rechazada`
+  - `En Proceso` $\rightarrow$ `En Espera` $\mid$ `Atendida`
+  - `En Espera` $\rightarrow$ `En Proceso` $\mid$ `Cancelada`
+  - `Atendida` $\rightarrow$ `Cerrada` $\mid$ `En Proceso` (vía reapertura)
+  - `Cerrada`, `Rechazada`, `Cancelada` $\rightarrow$ Estados finales inmutables.
+- **Mecanismo:** Validación por máquina de estados en el Modelo y persistencia obligatoria en la misma transacción dentro de `sol_historial_estados`.
 
-## 9. Criterios de salida
+### RN-006: Suspensión de SLA con Causal Catalogada
+- **Regla:** El paso al estado `En Espera` exige `causal_codigo` obligatoria (FK hacia `cat_causales`), congela el reloj de SLA y fija una fecha tentativa de reanudación.
+- **Mecanismo:** La transacción actualiza `sol_control_tiempo_sla.esta_pausado = 1`, almacena `fecha_ultima_pausa_utc` y registra la causal en `sol_historial_estados`.
 
-- [x] FK con `ON DELETE` explícito en todo el modelo.
-- [x] UNIQUE de claves naturales de negocio mapeadas a RN/RF.
-- [x] CHECK de dominio (dinero, stock, cantidades, transferencia).
-- [x] RN→restricción trazadas (incl. append-only y jerarquía).
-- [x] Límites de integridad delegados a app declarados (ciclos de categoría, expiración de reserva).
-- [x] Pendientes DB-P01/P02/P09 cerrados 2026-09-22; DB-P08/P12 y TTL carrito marcados sin inventar respuestas.
-- [x] Sin SQL de migración.
+### RN-007: Informe Técnico Previo a la Atención
+- **Regla:** Para transicionar a `Atendida`, es requisito indispensable haber registrado el informe técnico detallando diagnóstico, acciones, tiempo real e insumos.
+- **Mecanismo:** Verificación de existencia previa o inserción en la misma transacción de la tupla 1:1 en `sol_informes_atencion`.
 
-**Estado:** Paso 08 COMPLETADO → siguiente: Paso 09 (`07_seguridad/seguridad.md`).
+### RN-010: Ventana de Reapertura de 48 Horas
+- **Regla:** Una solicitud en `Atendida` solo puede reabrirse dentro de los 48 horas posteriores a `fecha_atencion_utc`.
+- **Mecanismo:** Validación estricta: `CURRENT_TIMESTAMP <= fecha_atencion_utc + INTERVAL 48 HOUR`. Tras 48 horas sin inconformidad, el worker la transiciona automáticamente a `Cerrada` vía evento outbox `AUTO_CIERRE_48H`.
+
+### RN-011: Idempotencia Transaccional
+- **Regla:** Toda petición HTTP de radicación o transición incluye `Idempotency-Key`.
+- **Mecanismo:** Si el token ya existe en `ops_idempotencia` y su hash SHA-256 coincide, se retorna el código y cuerpo previo sin ejecutar inserción ni disparo de alertas; si el hash difiere, se rechaza con error 409 Conflict.
+
+### RN-012 y RN-013: Prohibición de Borrado Físico y Retención de 5 Años
+- **Regla:** Prohibido el borrado físico de órdenes, historiales y auditorías.
+- **Mecanismo:** Políticas de base de datos a nivel de motor:
+  ```sql
+  REVOKE DELETE ON ALL TABLES IN SCHEMA public FROM s3ih_app_user;
+  REVOKE UPDATE, DELETE ON sol_historial_estados, sol_bitacora, audit_eventos FROM s3ih_app_user;
+  ```
+
+### RNF-035: Política Zero-PHI
+- **Regla:** Cero información de pacientes ni historias clínicas en fallas locativas y de equipamiento.
+- **Mecanismo:** El esquema de base de datos carece por completo de entidades, columnas o relaciones relativas a pacientes. Las descripciones solo admiten texto técnico sobre fallas mecánicas, eléctricas o locativas.
+
+---
+
+## 6. Conclusión y Resumen de Estado
+
+El modelo de integridad hospitalario formaliza la protección total de datos en sus 5 capas, garantizando que ninguna anomalía concurrente, caída de red o fallo operativo vulnere la trazabilidad, disponibilidad o inmutabilidad del sistema de salud.
+
+---
+
+**Estado del Paso:** Paso 08 COMPLETADO con éxito.  
+**Siguiente Paso:** Paso 09 — Seguridad y Control de Acceso (`proyecto/05_base_datos/07_seguridad/seguridad.md`), utilizando el skill `databases`.

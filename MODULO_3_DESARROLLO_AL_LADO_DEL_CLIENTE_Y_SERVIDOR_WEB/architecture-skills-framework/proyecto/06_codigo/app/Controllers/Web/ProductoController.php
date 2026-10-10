@@ -18,7 +18,10 @@ final class ProductoController
             exit;
         }
         header('Content-Type: text/html; charset=utf-8');
-        View::render('productos/index', ['pageTitle' => 'Productos'], 'layouts/main');
+        View::render('productos/index', [
+            'pageTitle' => 'Catálogo de Productos | S3IH',
+            'userName' => (string) ($_SESSION['nombre'] ?? 'Personal S3IH'),
+        ], 'layouts/main');
     }
 
     private function hasSession(): bool

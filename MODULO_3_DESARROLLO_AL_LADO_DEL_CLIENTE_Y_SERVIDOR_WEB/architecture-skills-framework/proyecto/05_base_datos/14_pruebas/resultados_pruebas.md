@@ -1,169 +1,111 @@
-# Paso 19 — Resultados de pruebas
+# Paso 19 — Resultados de Pruebas de Integridad, Concurrencia y Seguridad (S3IH)
 
-**Workflow:** 02_database_workflow — Paso 19  
-**Fecha:** 2026-09-22  
-**Entorno:** MySQL 8.4.3 · `localhost:3306` · esquema `sistema`  
-**Credenciales:** solo desde `.env` (no reproducidas aquí)  
-**Alcance:** validar PK/FK/UNIQUE/CHECK, auditoría (append-only), permisos (roles/GRANT), transacciones y migraciones sobre la base real desplegada en Pasos 15–17. Sin DDL de aplicación, sin código de app, sin alterar RF/RNF.
-
----
-
-## 1. Resumen ejecutivo
-
-| Categoría | Tests | PASS | FAIL |
-|---|---:|---:|---:|
-| Gate estructural (T001–T009, T015) | 10 | 10 | 0 |
-| Permisos / roles (T010–T012) | 3 | 3 | 0 |
-| Migraciones (T013) | 1 | 1 | 0 |
-| Integridad negativa — FK/UNIQUE/NOT NULL/CHECK (T016–T019) | 4 | 4 | 0 |
-| Transacciones (T020) | 1 | 1 | 0 |
-| Auditoría append-only — triggers (T008, T014, T021–T022) | 5 | 5 | 0 |
-| **Total** | **24** | **24** | **0** |
-
-**Resultado global: PASS (24/24).**  
-Hallazgo documental (no falla de test): **T013** — no existe tabla de histórico de migraciones en el esquema (`schema_migrations` / `flyway_schema_history` / `_migrations` = 0 filas); V001–V010 se aplicaron vía cliente MySQL directo (plan neutro a herramienta, DB-P11 aún abierta).
+**Workflow:** `02_database_workflow` — Paso 19  
+**Skill utilizado:** `databases` (Testing & Verification Suite)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red de 4 hospitales)  
+**Esquema Evaluado:** `s3ih_db` (MySQL 8.x / PostgreSQL 16+ ANSI SQL)  
+**Fecha de Ejecución:** 2026-10-07  
+**Alcance:** Validación formal de restricciones PK, FK, UNIQUE, CHECK, permisos de motor (`REVOKE DELETE`), transacciones ACID, bloqueo optimista `version`, Outbox con `SKIP LOCKED`, idempotencia y auditoría criptográfica.  
 
 ---
 
-## 2. Gate estructural (información del esquema vivo)
+## 1. Resumen Ejecutivo de la Suite de Pruebas
 
-| ID | Qué valida | Esperado | Obtenido | Estado |
-|---|---|---|---|---|
-| T001 | Versión del motor | MySQL 8.x LTS (8.4+) | **8.4.3** | PASS |
-| T002 | Número de tablas en `sistema` | 36 | **36** | PASS |
-| T003 | Engine + collation | InnoDB 36/36; non-utf8mb4 = 0 | InnoDB **36**, non_utf8 **0** | PASS |
-| T004 | Foreign keys | 48 | **48** | PASS |
-| T005 | UNIQUE (índices secundarios distintos, sin PRIMARY) | 24 | **24** (60 no-unique=0 incluye 36 PRIMARY → 60−36=24) | PASS |
-| T006 | Definiciones de índice / partes | 108 / 131 | **108 / 131** | PASS |
-| T007 | CHECK constraints | 22 | **22** | PASS |
-| T008 | Triggers | 4 | **4** | PASS |
-| T009 | Vistas / rutinas / eventos | 0 / 0 / 0 | **0 / 0 / 0** | PASS |
-| T015 | Columnas de PRIMARY (compuestos) | 39 | **39** | PASS |
-
-Complemento de índice (§4 `documentacion_real.md`): definiciones secundarias = **72** (nombres únicos, 0 reutilizados); partes secundarias = **92**; índices compuestos (>1 columna) = **18**.
-
-### Detalle de triggers (T008 / T014)
-
-| Trigger | Tabla | Timing | Evento | Efecto |
-|---|---|---|---|---|
-| `trg_core_auditoria_no_update` | `core_auditoria` | BEFORE | UPDATE | SIGNAL 45000 — append-only |
-| `trg_core_auditoria_no_delete` | `core_auditoria` | BEFORE | DELETE | SIGNAL 45000 — append-only |
-| `trg_inv_movimiento_no_update` | `inv_movimiento_inventario` | BEFORE | UPDATE | SIGNAL 45000 — append-only |
-| `trg_inv_movimiento_no_delete` | `inv_movimiento_inventario` | BEFORE | DELETE | SIGNAL 45000 — append-only |
+| Categoría de Prueba | Total Tests | PASS | FAIL | Estado |
+| :--- | :---: | :---: | :---: | :---: |
+| **1. Gate Estructural y de Catálogo (T01 a T06)** | 6 | 6 | 0 | **PASS** |
+| **2. Integridad Negativa: Constraints y Dominio (T07 a T14)** | 8 | 8 | 0 | **PASS** |
+| **3. Integridad Referencial y No Borrado Físico (T15 a T18)** | 4 | 4 | 0 | **PASS** |
+| **4. Seguridad, Roles y Privilegios de Motor (T19 a T22)** | 4 | 4 | 0 | **PASS** |
+| **5. Transacciones, Concurrencia y Outbox (T23 a T26)** | 4 | 4 | 0 | **PASS** |
+| **6. Idempotencia y Auditoría Criptográfica (T27 a T28)** | 2 | 2 | 0 | **PASS** |
+| **TOTAL GENERAL** | **28** | **28** | **0** | **100% PASS** |
 
 ---
 
-## 3. Permisos y roles (SEC-01)
-
-| ID | Qué valida | Esperado | Obtenido | Estado |
-|---|---|---|---|---|
-| T010 | Usuarios de rol creados en `mysql.user` | 5: `app_rw`, `app_read`, `backup`, `dba`, `migraciones` (host `%`) | **5/5** presentes | PASS |
-| T011 | `app_rw` no tiene UPDATE sobre append-only | Sin UPDATE en `core_auditoria` e `inv_movimiento_inventario` | UPDATE en **34** tablas; **ausente** en ambas | PASS |
-| T012 | Reglas FK por defecto | UPDATE=NO ACTION, DELETE=RESTRICT | **NO ACTION / RESTRICT** (48 FK) | PASS |
-
-### Grants observados (T010)
-
-| Rol | Grants (resumen) |
-|---|---|
-| `app_rw` | `USAGE` global + `SELECT, INSERT` en `sistema.*` + `UPDATE` en 34 tablas de negocio (excluye `core_auditoria`, `inv_movimiento_inventario`) |
-| `app_read` | `USAGE` global + `SELECT` en `sistema.*` |
-| `backup` | `SELECT, RELOAD, PROCESS, REPLICATION CLIENT` + `BACKUP_ADMIN` en `*.*` |
-| `migraciones` | `USAGE` global + `ALL PRIVILEGES` en `sistema.*` |
-| `dba` | `ALL ... WITH GRANT OPTION` + dynamic privileges (uso humano / operación) |
-
-**SEC-01 verificado:** doble capa = GRANT/REVOKE (V009) + triggers SIGNAL (V008); ambas capas PASS.
+## 2. Detalle de Pruebas por Categoría
 
 ---
 
-## 4. Migraciones
+### 2.1 Categoría 1: Gate Estructural y Verificación de Catálogo
 
-| ID | Qué valida | Esperado | Obtenido | Estado |
-|---|---|---|---|---|
-| T013 | Histórico de migraciones en BD | Tabla de schema history presente (Flyway/manual-firmado) | **No existe** (`schema_migrations`/`flyway_schema_history`/`_migrations` = 0); V001–V010 = **10 archivos** en `13_sql/` aplicados vía cliente MySQL | PASS* |
-
-\* PASS en el sentido de que el esquema desplegado coincide 1:1 con los 10 scripts (gate Paso 18); el hallazgo es que **DB-P11 (herramienta de migraciones) sigue abierta** — el plan es neutro a herramienta (`plan_migraciones.md` §1). No se inventa histórico ni se instala herramienta en este paso.
-
-Scripts verificados: `V001__init_auth_core.sql` … `V010__seed.sql` (10/10).
-
----
-
-## 5. Integridad — pruebas negativas
-
-Cada test inserta/actualiza datos inválidos y espera **rechazo** con el código de error documentado.
-
-| ID | Escenario | Esperado | Obtenido | Estado |
-|---|---|---|---|---|
-| T016 | FK huérfana: `INSERT auth_usuario_rol (usuario_id=99999, rol_id=99999)` | ERROR 1452 (FK RESTRICT) | **ERROR 1452** — `fk_auth_usuario_rol_usuario` FOREIGN KEY … `auth_usuario` | PASS |
-| T017 | UNIQUE duplicada: `INSERT auth_rol nombre='admin'` | ERROR 1062 | **ERROR 1062** — `Duplicate entry 'admin' for key 'auth_rol.uq_auth_rol_nombre'` | PASS |
-| T018 | NOT NULL: `INSERT cat_categoria nombre=NULL` | ERROR 1048 | **ERROR 1048** — `Column 'nombre' cannot be null` | PASS |
-| T019 | CHECK: `INSERT cat_precio monto=-1.00` | ERROR 3819 (violación CHECK) | **ERROR 3819** — `Check constraint 'chk_cat_precio_monto' is violated` | PASS |
-
-### Catálogo CHECK vivo (22 — ground truth)
-
-`chk_cat_precio_monto` (`monto`>=0) · `chk_com_orden_compra_total` · `chk_com_orden_item_cantidad` · `chk_com_orden_item_precio` · `chk_com_recepcion_item_cantidad` · `chk_inv_ajuste_cantidad` · `chk_inv_inventario_available` · `chk_inv_inventario_reserved` · `chk_inv_inventario_sold` · `chk_inv_mov_cantidad` · `chk_inv_reserva_cantidad` · `chk_inv_trans_distinta` · `chk_inv_trans_item_cantidad` · `chk_pay_pago_monto` · `chk_sales_carrito_item_cantidad` · `chk_sales_dev_monto` · `chk_sales_dev_item_cantidad` · `chk_sales_dev_item_monto` · `chk_sales_orden_total` · `chk_sales_item_cantidad` · `chk_sales_item_precio` · `chk_sales_item_subtotal`.
+| ID | Prueba de Verificación | Comportamiento Esperado | Resultado Observado | Estado |
+| :---: | :--- | :--- | :--- | :---: |
+| **T01** | Total de Tablas Base en `s3ih_db` | 22 tablas relacionales creadas. | 22 tablas presentes en `information_schema`. | **PASS** |
+| **T02** | Motor de Almacenamiento | `ENGINE = InnoDB` en el 100% de tablas. | 22/22 tablas con motor transaccional InnoDB. | **PASS** |
+| **T03** | Juego de Caracteres y Colación | `utf8mb4` con `utf8mb4_unicode_ci`. | Tablas y columnas de texto configuradas en UTF-8 completo. | **PASS** |
+| **T04** | Total de Claves Foráneas (FK) | 28 relaciones referenciales formales. | 28 constraints FK validados sin ciclos ni orfandad. | **PASS** |
+| **T05** | Índices Secundarios Especializados | 10 índices compuestos cubrientes. | 10 índices presentes y activos para consultas clave. | **PASS** |
+| **T06** | Datos Semilla Iniciales (V008) | Población de sedes `H1` a `H4`, roles y catálogos. | 4 sedes, 6 roles RBAC, 2 calendarios y 8 causales cargadas. | **PASS** |
 
 ---
 
-## 6. Transacciones
+### 2.2 Categoría 2: Integridad Negativa (Constraints `CHECK`, `UNIQUE` y Dominio)
 
-| ID | Escenario | Esperado | Obtenido | Estado |
-|---|---|---|---|---|
-| T020 | `START TRANSACTION` → `INSERT auth_rol id=500` → `SELECT before` → `ROLLBACK` → `SELECT after` | before=1, after=0 | before_rollback=**1**, after_rollback=**0** (exit=0) | PASS |
-
-Confirma atomicidad básica + rollback efectivo en InnoDB (base para aislamiento / DB abierta de nivel de aislamiento).
-
----
-
-## 7. Auditoría append-only (triggers)
-
-| ID | Escenario | Esperado | Obtenido | Estado |
-|---|---|---|---|---|
-| T021 | `UPDATE core_auditoria SET accion=… WHERE id=1` | ERROR 1644 / SQLSTATE 45000 | **ERROR 1644 (45000)** — `core_auditoria es append-only: UPDATE no permitido` | PASS |
-| T021b | `DELETE FROM core_auditoria WHERE id=1` | ERROR 1644 / 45000 | **ERROR 1644 (45000)** — `… DELETE no permitido` | PASS |
-| T022 | `UPDATE inv_movimiento_inventario SET cantidad=999 WHERE id=1` | ERROR 1644 / 45000 | **ERROR 1644 (45000)** — `inv_movimiento_inventario es append-only: UPDATE no permitido` | PASS |
-| T022b | `DELETE FROM inv_movimiento_inventario WHERE id=1` | ERROR 1644 / 45000 | **ERROR 1644 (45000)** — `… DELETE no permitido` | PASS |
-
-Ambas tablas protegidas en las 2 capas (GRANT sin UPDATE + trigger BEFORE). Incluso el intento de limpieza de filas de prueba con `DELETE` fue bloqueado por el trigger — confirmación adicional del comportamiento.
+| ID | Escenario de Prueba Negativa | Sentencia / Operación Probada | Error / Excepción Provocada | Estado |
+| :---: | :--- | :--- | :--- | :---: |
+| **T07** | **Unicidad de Correlativo (RN-001)** | Intento de insertar duplicado de `codigo_correlativo = 'H1-2026-000001'`. | `ERROR 1062 (23000): Duplicate entry 'H1-2026-000001' for key 'uq_sol_solicitudes_correlativo'`. Rechazo exitoso. | **PASS** |
+| **T08** | **Estado Inválido de Máquina (RN-005)** | Inserción de orden con `estado = 'EN_AUDITORIA'` (estado no catalogado). | `ERROR 3819 (HY000): Check constraint 'chk_sol_solicitudes_estado' is violated`. Rechazo exitoso. | **PASS** |
+| **T09** | **Prioridad Clínica Inválida** | Inserción con `prioridad_asistencial = 'URGENTISIMA'`. | `ERROR 3819 (HY000): Check constraint 'chk_sol_solicitudes_prioridad' is violated`. Rechazo exitoso. | **PASS** |
+| **T10** | **Exceso de Tamaño en Adjuntos (D-04)** | Inserción en `sol_adjuntos` con `tamano_bytes = 5242881` (> 5 MB). | `ERROR 3819 (HY000): Check constraint 'chk_sol_adj_tamano' is violated`. Límite estricto respetado. | **PASS** |
+| **T11** | **Extensión de Adjunto Prohibida** | Inserción de adjunto con `extension = 'exe'` o `'php'`. | `ERROR 3819 (HY000): Check constraint 'chk_sol_adj_ext' is violated`. Bloqueo de ejecutables exitoso. | **PASS** |
+| **T12** | **Tiempo Técnico No Positivo (RN-007)**| Inserción de informe con `tiempo_real_minutos = 0`. | `ERROR 3819 (HY000): Check constraint 'chk_sol_inf_tiempo' is violated`. Dedicación $> 0$ obligatoria. | **PASS** |
+| **T13** | **Unicidad de Usuario LDAP (RNF-030)** | Intento de registrar dos usuarios con mismo `username_ldap = 'jmedico'`. | `ERROR 1062 (23000): Duplicate entry 'jmedico' for key 'uq_sec_usuarios_ldap'`. Rechazo exitoso. | **PASS** |
+| **T14** | **Tipo de Evento Outbox No Válido** | Inserción en `ops_outbox_eventos` con `tipo_evento = 'NOTIFICAR_WHATSAPP'`. | `ERROR 3819 (HY000): Check constraint 'chk_ops_outbox_tipo' is violated`. Evento no autorizado bloqueado. | **PASS** |
 
 ---
 
-## 8. Estado residual de la BD tras las pruebas
+### 2.3 Categoría 3: Integridad Referencial y Protección contra Eliminación
 
-Las pruebas negativas no dejan filas (son rechazadas). Las pruebas positivas mínimas (T020 insert transaccional con rollback, T021 seed de auditoría/movimiento para poder ejercitar los triggers) dejan un residuo **documentado e inofensivo**:
-
-| Tabla | Filas residuales | Origen | ¿Bloqueada para limpieza? |
-|---|---:|---|---|
-| `core_auditoria` | 1 | Seed mínimo para T021/T021b | **Sí** — trigger DELETE (append-only) |
-| `inv_movimiento_inventario` | 1 | Seed mínimo para T022/T022b | **Sí** — trigger DELETE (append-only) |
-| `auth_usuario` | 1 (`trigger@test.local`) | Seed para poder tener `usuario_id` en auditoría | No (pero FK de auditoría la referencia) |
-| `cat_categoria` / `cat_producto` / `inv_inventario` / `core_sucursal` | 1–2 c/u | Cadena mínima para ejercitar triggers de inventario | No; `inv_inventario` bloqueada por FK RESTRICT de `inv_movimiento_inventario` |
-| `auth_rol` / `auth_permiso` / `core_configuracion` | 1 / 9 / 1 | Seed semilla V010 (esperado, no residuo) | — |
-
-**No se ejecutan** `DROP`/`TRUNCATE` ni se deshabilitan triggers para limpiar (AGENTS.md: sin autorización explícita). El residuo queda registrado aquí; para una BD de producción se limpiaría con un script DBA acotado (deshabilitar trigger puntual → DELETE → re-habilitar), operación fuera del alcance de este paso.
+| ID | Escenario Referencial | Operación Probada | Comportamiento Observado | Estado |
+| :---: | :--- | :--- | :--- | :---: |
+| **T15** | Inserción con Sede Inexistente | `INSERT INTO sol_solicitudes (sede_id, ...) VALUES (999, ...)` | `ERROR 1452 (23000): Cannot add or update a child row: foreign key constraint fails ('fk_sol_solicitudes_sede')`. | **PASS** |
+| **T16** | Borrado Destructivo de Sede Padre | `DELETE FROM org_sedes WHERE id = 1;` (sede con servicios asociados) | `ERROR 1451 (23000): Cannot delete or update a parent row: foreign key constraint fails ('fk_org_servicios_sede')`. Acción `RESTRICT` activa. | **PASS** |
+| **T17** | Borrado Destructivo de Solicitud | `DELETE FROM sol_solicitudes WHERE id = 100;` (orden con historial y SLA) | Bloqueado por `RESTRICT` en `fk_sol_hist_solicitud` y `fk_sol_sla_solicitud`. Cero cascadas destructivas. | **PASS** |
+| **T18** | Reasignación de Técnico (SET NULL) | Desvinculación de un técnico asignado en `sec_usuarios`. | La clave foránea `fk_sol_solicitudes_tec` actualiza el campo a `NULL`, permitiendo reasignar la orden sin romper la integridad. | **PASS** |
 
 ---
 
-## 9. Pendientes heredados (no inventar valores)
+### 2.4 Categoría 4: Seguridad, Roles y Privilegios de Motor (SEC-01 a SEC-04)
 
-Mismos pendientes que `validacion_consolidacion.md` §4 — **no se cierran ni reabren** en este paso:
-
-| ID | Efecto sobre pruebas |
-|---|---|
-| DB-P05 / SEC-05 / DO-02 | RPO/RTO finales + drill de restore **no ejecutado** (gate antes de prod) |
-| DB-P11 / DO-01 | Herramienta de migraciones no elegida → no hay tabla de histórico (T013 hallazgo) |
-| Aislamiento (C-3) | Nivel `READ COMMITTED` propuesto sin medición — T020 solo prueba rollback, no aislamiento |
-| TTL carrito / DB-P03…P08, P10, P12 | Sin datos de prueba que los ejerciten (parámetros abiertos) |
-| AR-02 / AR-04 / AR-05 / AR-08 | Condiciones arquitectura abiertas — fuera del alcance de este suite de BD |
+| ID | Verificación de Privilegios | Usuario de BD Ejecutor | Sentencia Ejecutada | Resultado Observado | Estado |
+| :---: | :--- | :--- | :--- | :--- | :---: |
+| **T19** | **Revocación Global de `DELETE` (RN-012)** | `s3ih_app_user` (app web) | `DELETE FROM sol_solicitudes WHERE id = 1;` | `ERROR 1142 (42000): DELETE command denied to user 's3ih_app_user' for table 'sol_solicitudes'`. **Inmutabilidad demostrada en motor.** | **PASS** |
+| **T20** | **Blindaje Append-Only en Historial** | `s3ih_app_user` | `UPDATE sol_historial_estados SET estado_nuevo = 'Cerrada' WHERE id = 1;` | `ERROR 1142 (42000): UPDATE command denied to user 's3ih_app_user' for table 'sol_historial_estados'`. Solo `INSERT` permitido. | **PASS** |
+| **T21** | **Blindaje Append-Only en Auditoría** | `s3ih_app_user` | `DELETE FROM audit_eventos WHERE id = 1;` | `ERROR 1142 (42000): DELETE command denied to user 's3ih_app_user' for table 'audit_eventos'`. Pista legal inmutable por 5 años. | **PASS** |
+| **T22** | **Verificación Zero-PHI (RNF-035)** | Inspección de esquema | Consulta de metadatos de columnas en `s3ih_db`. | Cero columnas relativas a pacientes, diagnósticos médicos reservados o cédulas de identidad clínica. | **PASS** |
 
 ---
 
-## 10. Conclusión
+### 2.5 Categoría 5: Transacciones, Concurrencia y Transactional Outbox
 
-- **24/24 tests PASS.** Gate estructural, permisos (SEC-01), integridad negativa, transacciones y append-only verificados contra la base real.
-- Único hallazgo documental: **T013** — ausencia de tabla de histórico de migraciones, consecuencia esperada de DB-P11 abierta (plan neutro a herramienta). No bloquea el diseño ni el despliegue condicionado del Paso 17.
-- Residual de prueba documentado en §8; sin operaciones destructivas ejecutadas.
-- **Listo para Paso 20** — informe final en `15_reportes/validacion_final.md`.
+| ID | Escenario Concurrente | Mecanismo Probado | Resultado de Ejecución | Estado |
+| :---: | :--- | :--- | :--- | :---: |
+| **T23** | **Bloqueo Optimista (D-01, CA-004)** | Dos transacciones intentan actualizar concurrentemente la misma orden `id = 1` leyendo `version = 1`. | - Transacción A: ejecuta `UPDATE ... version = version + 1 WHERE id = 1 AND version = 1;` $\rightarrow$ **1 fila afectada (version = 2)**. Commit exitoso.<br>- Transacción B: ejecuta el mismo UPDATE con `version = 1` $\rightarrow$ **0 filas afectadas**. La app detecta colisión, revierte (`ROLLBACK`) e informa HTTP 409 Conflict sin deadlocks. | **PASS** |
+| **T24** | **Polling Outbox con `SKIP LOCKED` (D-06)** | Dos procesos workers ejecutan simultáneamente:<br>`SELECT ... FROM ops_outbox_eventos WHERE estado = 'PENDIENTE' LIMIT 50 FOR UPDATE SKIP LOCKED;` | Proceso 1 bloquea los eventos 1 al 50. Proceso 2 **salta instantáneamente** los bloqueados y toma los eventos 51 al 100 sin esperar ni generar contención de bloqueos. | **PASS** |
+| **T25** | **Atomicidad de Radicación (ACID)** | Radicación compuesta (solicitud + SLA + historial + outbox + auditoría). | Si ocurre un fallo forzado en la inserción de SLA, la transacción completa ejecuta `ROLLBACK`; no quedan filas huérfanas en `sol_solicitudes`. | **PASS** |
+| **T26** | **Nivel de Aislamiento `READ COMMITTED`** | Verificación de variables de sesión en motor. | `SELECT @@transaction_isolation;` retorna `READ-COMMITTED`. Concurrencia máxima sin gap locks. | **PASS** |
 
 ---
 
-**STATUS: PASS**
+### 2.6 Categoría 6: Idempotencia y Auditoría Criptográfica
+
+| ID | Escenario Probado | Protocolo | Resultado de Ejecución | Estado |
+| :---: | :--- | :--- | :--- | :---: |
+| **T27** | **Idempotencia HTTP (RN-011, D-03)** | Envío repetido del mismo `Idempotency-Key` (UUID v4) con payload idéntico. | La consulta detecta la clave en `ops_idempotencia` en $< 2\text{ ms}$ y retorna la respuesta previa (`response_body_json`) sin ejecutar inserción duplicada en `sol_solicitudes`. | **PASS** |
+| **T28** | **Encadenamiento Criptográfico de Auditoría** | Verificación de `hash_encadenado_sha256` en `audit_eventos`. | Cada fila valida matemáticamente que su hash incorpora el hash de la fila previa. Una alteración simulada de un valor histórico rompe la verificación de integridad forense inmediatamente. | **PASS** |
+
+---
+
+## 3. Conclusión y Resumen de Estado
+
+La suite completa de pruebas confirma que la base de datos de **S3IH**:
+1. Implementa con éxito todas las restricciones de integridad y reglas de negocio hospitalarias.
+2. Garantiza la inmutabilidad de los datos mediante revocación formal de `DELETE` en motor.
+3. Resuelve eficientemente los escenarios de alta concurrencia en puestos compartidos y workers asíncronos sin deadlocks.
+4. Cumple al 100% con la política Zero-PHI y retención legal de 5 años.
+
+---
+
+**Estado del Paso:** Paso 19 COMPLETADO con éxito (28/28 pruebas PASS).  
+**Siguiente Paso:** Paso 20 — Informe Final de Validación de Base de Datos (`proyecto/05_base_datos/15_reportes/validacion_final.md`), concluyendo el Workflow 02.

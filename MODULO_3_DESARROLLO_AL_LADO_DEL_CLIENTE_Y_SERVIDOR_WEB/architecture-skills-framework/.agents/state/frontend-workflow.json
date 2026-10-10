@@ -1,16 +1,25 @@
-﻿{
-    "workflow":  "05_frontend_workflow",
-    "phase":  "frontend",
-    "scope":  [
-                  "/login",
-                  "/dashboard",
-                  "/categorias",
-                  "/productos"
-              ],
-    "current_checkpoint":  "COMPLETED",
-    "last_completed":  "CP-FRONT-09",
-    "technical_status":  "PASSED",
-    "human_status":  "APPROVED",
-    "blocked":  false,
-    "can_continue":  false
+{
+    "workflow": "05_frontend_workflow",
+    "phase": "frontend",
+    "scope": [
+        "/login",
+        "/dashboard",
+        "/categorias",
+        "/productos"
+    ],
+    "current_checkpoint": "CP-FRONT-09",
+    "last_completed_checkpoint": "CP-FRONT-09",
+    "workflow_status": "COMPLETED",
+    "technical_status": "PASSED",
+    "human_status": "APPROVED",
+    "blocked": false,
+    "can_continue": true,
+    "next": "Workflow 05 concluido y aprobado por el humano. En ejecución Workflow 06 (Integración).",
+    "skills_allowed": [
+        "frontend-engineering",
+        "frontend-design",
+        "responsive-design",
+        "accessibility-compliance"
+    ],
+    "last_completed": "CP-FRONT-09"
 }

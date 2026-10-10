@@ -1,0 +1,351 @@
+openapi: 3.1.0
+info:
+  title: API Piloto de Categorías Hospitalarias — S3IH
+  description: >
+    API REST piloto del Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH),
+    red de 4 hospitales. Gestiona la taxonomía jerárquica de bienes, suministros biomédicos,
+    infraestructura y servicios de soporte hospitalario.
+  version: 1.0.0
+  contact:
+    name: Equipo de Arquitectura S3IH
+    email: arquitectura@s3ih.salud.gob
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Servidor de desarrollo local
+
+paths:
+  /health:
+    get:
+      summary: Diagnóstico de salud y conectividad del servicio
+      operationId: getHealth
+      tags:
+        - Diagnóstico
+      responses:
+        '200':
+          description: Servicio hospitalario operativo y base de datos activa
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '500':
+          description: Error interno o falla de conectividad a la base de datos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /categorias:
+    get:
+      summary: Listar todas las categorías hospitalarias
+      operationId: listCategorias
+      tags:
+        - Categorías
+      responses:
+        '200':
+          description: Colección de categorías hospitalarias
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Categoria'
+                  message:
+                    type: string
+                    example: Categorías consultadas exitosamente
+        '500':
+          description: Falla en la base de datos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      summary: Crear una nueva categoría hospitalaria
+      operationId: createCategoria
+      tags:
+        - Categorías
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoriaCreateRequest'
+      responses:
+        '201':
+          description: Categoría creada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Categoria'
+        '400':
+          description: Error de validación en la carga útil
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: La categoría padre referenciada no existe
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno de persistencia
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /categorias/{id}:
+    get:
+      summary: Obtener detalle de una categoría por su ID
+      operationId: getCategoriaById
+      tags:
+        - Categorías
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Identificador numérico de la categoría
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Detalle de la categoría
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Categoria'
+        '400':
+          description: ID inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Categoría no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error de base de datos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      summary: Actualizar una categoría hospitalaria existente
+      operationId: updateCategoria
+      tags:
+        - Categorías
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Identificador numérico de la categoría a actualizar
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoriaUpdateRequest'
+      responses:
+        '200':
+          description: Categoría actualizada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Categoria'
+        '400':
+          description: Error de validación o autoreferencia (auto-padre)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Categoría no encontrada o padre inexistente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error de base de datos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      summary: Inactivar lógicamente una categoría (Soft-delete)
+      description: >
+        En cumplimiento de la gobernanza hospitalaria (RN-012), esta operación nunca
+        ejecuta DELETE FROM en la base de datos. Modifica el estado a 'inactivo' de manera idempotente.
+      operationId: deactivateCategoria
+      tags:
+        - Categorías
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Identificador numérico de la categoría a inactivar
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Categoría inactivada exitosamente (idempotente)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Categoria'
+        '400':
+          description: ID inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Categoría no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error de base de datos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    Categoria:
+      type: object
+      required:
+        - id
+        - nombre
+        - estado
+      properties:
+        id:
+          type: integer
+          example: 10
+        nombre:
+          type: string
+          example: Equipamiento Biomédico y Soporte Vital
+        categoria_padre_id:
+          type:
+            - integer
+            - "null"
+          example: null
+        estado:
+          type: string
+          enum:
+            - activo
+            - inactivo
+          example: activo
+
+    CategoriaCreateRequest:
+      type: object
+      required:
+        - nombre
+      properties:
+        nombre:
+          type: string
+          minLength: 3
+          maxLength: 100
+          example: Ventiladores Mecánicos Adulto y Pediátrico
+        categoria_padre_id:
+          type:
+            - integer
+            - "null"
+          example: 1
+
+    CategoriaUpdateRequest:
+      type: object
+      required:
+        - nombre
+      properties:
+        nombre:
+          type: string
+          minLength: 3
+          maxLength: 100
+          example: Ventiladores Mecánicos de Cuidados Críticos
+        categoria_padre_id:
+          type:
+            - integer
+            - "null"
+          example: 1
+
+    HealthResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              example: ok
+            db:
+              type: string
+              example: up
+            php:
+              type: string
+              example: 8.3.33
+            app:
+              type: string
+              example: S3IH - Sistema Hospitalario
+            timestamp:
+              type: string
+              format: date-time
+        message:
+          type: string
+          example: Servicio hospitalario operativo y saludable
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: Error de validación o recurso no encontrado

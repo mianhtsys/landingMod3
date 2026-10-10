@@ -1,269 +1,198 @@
-# Análisis de Seguridad — D-07
+# Análisis de Seguridad, Identidad y Privacidad (D-07) — Sistema Hospitalario S3IH
 
-Fecha: 2026-09-17
-Especialista: security-reviewer
-Driver: RNF-030 a RNF-035
-
----
-
-## Referencia de Requisitos de Seguridad
-
-| RNF | Requisito |
-|-----|-----------|
-| RNF-030 | Autenticación para operaciones administrativas |
-| RNF-031 | Autorización por mínimo privilegio |
-| RNF-032 | Cifrado en tránsito |
-| RNF-033 | Contraseñas nunca en texto plano |
-| RNF-034 | Secretos fuera del repositorio |
-| RNF-035 | Controles de seguridad para APIs |
+Fecha: 2026-10-07  
+Fase: 05 — Revisión de Seguridad y Cumplimiento  
+Rol: `security-reviewer`  
+Skill: `security-review`  
+Fuente: `01_requirements_analysis.md`, `02_decision_scope.md`, `03_architecture_options.md`, `04_database_analysis.md`  
+Estado: Aprobado para revisión de infraestructura y consolidación  
 
 ---
 
-## Opción 1: JWT + RBAC interno
+## 1. Resumen Ejecutivo y Requisitos de Seguridad
 
-**Mecanismo**: Backend emite JWT firmados (RS256 o HS256 con clave rotativa). RBAC se implementa como middleware que valida claims en cada request.
+El **Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH)** opera dentro del perímetro de una red hospitalaria de **hasta 4 hospitales** donde interactúan más de 700 usuarios concurrentes en puestos fijos clínicos (quirófanos, puestos de enfermería) y terminales móviles en carros de guardia.
 
-### Cobertura de RNFs
+Aunque el sistema **NO es un Expediente Clínico Electrónico (EHR/HIS)**, gestiona solicitudes sobre activos que sustentan la vida de pacientes (soporte vital en UCI, ventiladores, aire medicinal, equipamiento quirúrgico). Por ende, una alteración maliciosa, suplantación de identidad o indisponibilidad inducida representa un **riesgo directo para la continuidad asistencial y la seguridad del paciente**.
 
-| RNF | Cobertura | Nota |
-|-----|-----------|------|
-| RNF-030 | ✅ | JWT se emite tras login válido |
-| RNF-031 | ✅ | Claims del JWT incluyen roles; middlewareRBAC filtra por permiso mínimo |
-| RNF-032 | ✅ | Independiente — requiere TLS en HTTP layer |
-| RNF-033 | ✅ | Validación de contraseña en login; hash con bcrypt/argon2 en DB |
-| RNF-034 | ⚠️ | La firma JWT necesita una clave secreta; debe gestionarse por env vars o vault |
-| RNF-035 | ✅ | Cada request API携带 JWT; rate limiting y validación en middleware |
+### Matriz de Requisitos No Funcionales de Seguridad
 
-### Trade-offs
-
-- **Complejidad**: Baja-moderada. El sistema se construye desde cero pero es directo.
-- **Mantenimiento**: Bajo. Sin dependencia externa para auth.
-- **Nivel de seguridad**: Medio-alto. El token viaja en el cliente; si se compromete, el daño es proporcional al TTL. Revocación inmediata requiere blacklist en BD (O(n) en requests) o aceptar TTL corto.
-- **POS físico**: Funciona bien — POS puede autenticar localmente con credenciales propias o un JWT emitido por la plataforma.
-
-### Riesgos
-
-1. **Revocación**: JWT no se invalida por defecto. Se necesita un endpoint de blacklist o almacenamiento de tokens activos → añade complejidad que muchos subestiman.
-2. **Robo de token**: Sin refresh tokens bien diseñados, un token robado tiene acceso hasta expirar.
-3. **Crecimiento de claims**: A medida que crecen los permisos, el JWT puede volverse innecesariamente grande o tener datos sensibles en el payload.
+| ID | Requisito Formal | Mecanismo Arquitectónico de Cumplimiento |
+| :--- | :--- | :--- |
+| **RNF-030** | Autenticación institucional integrada y timeout de inactividad de 30 min | Integración con Directorio Activo (AD/LDAP corporativo) + sesiones seguras de servidor con expiración estricta en puestos compartidos. |
+| **RNF-031** | Control de acceso basado en roles (RBAC) y mínimo privilegio | Matriz RBAC multidimensional: Rol funcional $\times$ Sede hospitalaria $\times$ Servicio asignado. |
+| **RNF-032** | Cifrado en tránsito y en reposo | Cifrado obligatorio TLS 1.3 / HTTPS en tránsito; cifrado AES-256 en reposo para volúmenes de base de datos y repositorio de adjuntos. |
+| **RNF-033** | Gestión externa de secretos y contraseñas seguras | Prohibición absoluta de credenciales en código/repositorio; inyección mediante variables de entorno; contingencia local con Argon2id/bcrypt. |
+| **RNF-034** | Validación y saneamiento de entradas y subida de archivos (5 MB) | Validación de firmas binarias (magic numbers/MIME real), tamaño $\le 5\text{ MB}$, renombramiento a UUID v4 y almacenamiento desacoplado fuera del web root. |
+| **RNF-035** | Aislamiento y protección estricta de datos clínicos de pacientes (PHI) | Política *Zero-PHI*: validaciones en frontend/backend que impiden almacenar diagnósticos o expedientes clínicos en campos descriptivos. |
+| **RN-012/013** | Inmutabilidad, no repudio y trazabilidad legal de auditoría | Revocación de `DELETE` en BD (`REVOKE DELETE`); pista inmutable con estampa UTC del servidor, IP de origen y usuario responsable. |
 
 ---
 
-## Opción 2: OAuth2/OIDC con Provider Externo
-
-**Mecanismo**: Se delega autenticación a un proveedor (Keycloak auto-hospedado, Auth0, AWS Cognito). El backend valida tokens OIDC emitidos por el IdP.
-
-### Cobertura de RNFs
-
-| RNF | Cobertura | Nota |
-|-----|-----------|------|
-| RNF-030 | ✅ | El IdP maneja login, MFA, etc. |
-| RNF-031 | ✅ | RBAC se configura en el IdP o como claims. El backend valida scopes/roles. |
-| RNF-032 | ✅ | OIDC especifica TLS. El IdP lo impone. |
-| RNF-033 | ✅ | El IdP maneja hashing de contraseñas. |
-| RNF-034 | ✅ | El IdP tiene su propio vault. El backend solo necesita el client_id y JWKS endpoint. |
-| RNF-035 | ✅ | Validación de tokens OIDC + rate limiting en backend. |
-
-### Trade-offs
-
-- **Complejidad**: Alta. Requiere infraestructura adicional (Keycloak o servicio externo).
-- **Mantenimiento**: Alto si self-hosted (Keycloak). Bajo si managed (Auth0) pero con costo mensual y lock-in.
-- **Nivel de seguridad**: Alto. MFA, session management, token rotation, y audit logging ya incluidos.
-- **POS físico**: Problemático. Un IdP externo requiere conectividad. POS offline no puede autenticar. Se necesitaría un mecanismo de fallback (token offline local) que rompe el modelo.
-
-### Riesgos
-
-1. **Disponibilidad del IdP**: Si Keycloak/Auth0 cae, no hay login. Dependencia de un punto único.
-2. **Latencia**: Cada autenticación implica un round-trip al IdP. En POS con latencia de red, esto es visible.
-3. **Vendor lock-in**: Auth0/Cognito crean dependencia. Keycloak self-hosted mitiga esto pero agrega carga operativa.
-4. **Costo**: Auth0 tiene pricing por MAU que escala rápido con miles de usuarios de POS + web.
-
----
-
-## Opción 3: Session-based + CSRF
-
-**Mecanismo**: Login crea una sesión en servidor (cookie `HttpOnly`, `Secure`, `SameSite=Strict`). El servidor almacena el estado de sesión. CSRF tokens se envían como parte de cada request POST/PUT/DELETE.
-
-### Cobertura de RNFs
-
-| RNF | Cobertura | Nota |
-|-----|-----------|------|
-| RNF-030 | ✅ | Sesión se crea tras login válido |
-| RNF-031 | ✅ | Roles se almacenan en la sesión del servidor |
-| RNF-032 | ✅ | Independiente — TLS siempre requerido |
-| RNF-033 | ✅ | Hash en BD, sesión no expone contraseña |
-| RNF-034 | ⚠️ | Secret de cookie signing y DB credentials deben ser externos |
-| RNF-035 | ✅ | CSRF token validado en cada mutating request. Rate limiting separado. |
-
-### Trade-offs
-
-- **Complejidad**: Baja. Patrón bien establecido, amplio soporte en frameworks.
-- **Mantenimiento**: Bajo. Sin JWT para manejar. Las sesiones se invalidan con un DELETE en BD.
-- **Nivel de seguridad**: Alto. El token de sesión nunca viaja al cliente en texto legible (HttpOnly). Revocación es instantánea (borrar sesión en BD). CSRF mitigado nativamente.
-- **POS físico**: Funciona si POS es una app web o SPA que consume la misma API. Menos natural para clientes nativos.
-
-### Riesgos
-
-1. **Escalabilidad de sesión**: Cada sesión activa consume memoria/almacenamiento. Con 25K transacciones/hora y múltiples POS, la tabla de sesiones puede crecer. Solución: TTL agresivo + Redis/Memcached.
-2. **Escenarios offline**: POS no puede autenticar sin conexión al servidor de sesiones. Similar limitación que OAuth2.
-3. **Stateful server**: Requiere que todas las instancias del servidor accedan al mismo store de sesiones. Limita sharding simple.
-
----
-
-## Opción 4: Híbrido (JWT para API, sesiones para POS)
-
-**Mecanismo**: API web (frontend SPA) usa sesiones con CSRF. POS (aplicación nativa) usa JWT con refresh tokens. Ambos mecanismos validan contra el mismo backend de autorización (RBAC interno).
-
-### Cobertura de RNFs
-
-| RNF | Cobertura | Nota |
-|-----|-----------|------|
-| RNF-030 | ✅ | Ambos canales autentican |
-| RNF-031 | ✅ | RBAC unificado detrás de ambos mecanismos |
-| RNF-032 | ✅ | TLS en ambos canales |
-| RNF-033 | ✅ | Hash en BD |
-| RNF-034 | ⚠️ | Clave JWT + secrets de sesión = dos superficies de secretos |
-| RNF-035 | ✅ | Validación diferenciada por canal |
-
-### Trade-offs
-
-- **Complejidad**: Media-alta. Dos mecanismos de autenticación = dos superficies de ataque, dos flujos de debugging, dos pipelines de testing.
-- **Mantenimiento**: Medio. Más código que Opción 1 o 3 por separado.
-- **Nivel de seguridad**: Bueno pero depende de la implementación. El doble mecanismo requiere disciplina para no crear inconsistencias.
-- **POS físico**: Ideal — JWT funciona offline con refresh tokens. Web usa sesiones más seguras.
-
-### Riesgos
-
-1. **Complejidad de mantenimiento**: Mantener dos flujos de auth sincronizados es propenso a errores. Un fix de seguridad en uno puede olvidarse en el otro.
-2. **Inconsistencia de permisos**: Si el RBAC no es estrictamente unificado, un rol puede tener permisos diferentes según el canal.
-3. **Superficie de error**: Más código = más bugs. Más configuración = más puntos de fallo.
-
----
-
-## Análisis Transversal: Secretos (RNF-034)
-
-**Requisito**: Secretos fuera del repositorio.
-
-### Estrategia Recomendada
-
-| Capa | Mecanismo |
-|------|-----------|
-| **Desarrollo** | Variables de entorno + `.env` excluido de Git (`.gitignore`) |
-| **Contenedores** | Secrets inyectados vía Docker secrets o variables de entorno en docker-compose |
-| **Producción** | Vault (HashiCorp) o equivalente cloud. Secrets montados como archivos o inyectados como env vars |
-| **Rotación** | Al menos: JWT signing key, DB password, API keys de pago. Rotación programada semanal/mensual |
-| **Auditoría** | Log de acceso a secrets (quién leyó qué, cuándo) |
-
-### Alternativas Evaluadas
-
-- **HashiCorp Vault**: Potente pero requiere infraestructura adicional (más complejidad = más superficie de ataque si no se mantiene).
-- **Docker secrets**: Simple, seguro para Docker Compose. Limitado para orquestación más compleja.
-- **Cloud secrets manager**: AWS Secrets Manager / GCP Secret Manager. Simple pero vendor lock-in.
-- **Variables de entorno simples**: Suficiente para entornos de desarrollo. En producción, mínimo docker secrets.
-
-**Nota**: RNF-062 exige separación de configuración entre entornos. Esto se alinea naturalmente con vault o env vars por entorno.
-
----
-
-## Análisis Transversal: Cifrado (RNF-032, RNF-033)
-
-### En Tránsito (RNF-032)
-
-| Componente | Estrategia |
-|------------|------------|
-| **Frontend ↔ Backend** | TLS 1.2+ obligatorio. Certificado válido (Let's Encrypt o certificado interno). HSTS habilitado. |
-| **Backend ↔ Base de datos** | Conexión cifrada (PostgreSQL: `sslmode=verify-full`). |
-| **Backend ↔ Proveedores de pago** | TLS implícito en comunicaciones con gateways. |
-| **POS ↔ Backend** | TLS. POS debe validar certificado del servidor (no usar `verify=False`). |
-| **Posible problema**: Certificados auto-firmados en POS requieren root CA confiable distribuida manualmente o por MDM. |
-
-### En Reposo (RNF-033 — contraseñas)
-
-| Dato | Estrategia |
-|------|------------|
-| **Contraseñas de usuario** | bcrypt (cost 12+) o argon2id. Nunca MD5/SHA sin salt. |
-| **Datos de pago** | No almacenar. Usar tokenización vía gateway de pago. |
-| **Datos personales** | Encriptación a nivel de columna si sensibles (PII). O encrypt-at-rest del volumen de DB si infra lo soporta. |
-| **Backups** | Cifrar backups con clave separada. Almacenar clave de backup fuera del mismo vault que los secrets de producción. |
-
-### Diagnóstico Actual
-
-RNF-033 dice "contraseñas nunca en texto plano" pero no especifica un algoritmo. La recomendación es argon2id (resistente a GPU) o bcrypt (más ampliamente soportado). No hay excusa para usar SHA sin salt.
-
----
-
-## Análisis Transversal: Auditoría de Seguridad (RNF-035)
-
-**Requisito**: Controles de seguridad para APIs.
-
-### Eventos a Registrar
-
-| Evento | Severidad | Retención mínima |
-|--------|-----------|------------------|
-| Login exitoso | INFO | 90 días |
-| Login fallido (3+ intentos) | WARN | 90 días |
-| Logout | INFO | 30 días |
-| Cambio de contraseña | WARN | 90 días |
-| Cambio de rol/permisos | CRITICAL | 1 año |
-| Acceso no autorizado (403) | WARN | 90 días |
-| Rate limit alcanzado | WARN | 30 días |
-| Error de autenticación (token inválido/expirado) | INFO | 30 días |
-| Operación de pago | INFO | 1 año |
-| Cambio de configuración del sistema | CRITICAL | 1 año |
-
-### Formato
+## 2. Modelado de Amenazas Hospitalario (STRIDE Aplicado a S3IH)
 
 ```
-timestamp | event | user_id | ip | user_agent | resource | result | detail
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│               Modelo STRIDE para la Red Hospitalaria (S3IH)                            │
+├─────────────────────┬──────────────────────────────────────────────────────────────────┤
+│ Spoofing (Supl.)    │ Suplantación de médicos/técnicos en terminales compartidas       │
+│ Tampering (Alter.)  │ Modificación no autorizada de prioridades de SLA o informes      │
+│ Repudiation (Rep.)  │ Negación de asignación o cierre indebido de solicitudes vitales  │
+│ Info Disclosure     │ Fuga accidental de datos protegidos de pacientes (PHI)           │
+│ DoS (Denegación)    │ Saturación de I/O mediante subida masiva de archivos de 5 MB     │
+│ Elev. of Privilege  │ Técnicos auto-asignándose o auto-aprobando cierres sin auditoría │
+└─────────────────────┴──────────────────────────────────────────────────────────────────┘
 ```
 
-JSON estructurado. Alineado con RNF-050 (logs estructurados) y RNF-052 (correlación distribuida).
-
-### Implementación
-
-- Middleware en cada endpoint de auth que escribe a archivo o stdout (para captura por docker logs + pipeline).
-- No loggear: contraseñas, tokens, datos de tarjeta. Solo hashes o tokens redactados.
-- Integración con stack de observabilidad de D-08 (OpenTelemetry o ELK).
-
----
-
-## Comparación Resumen
-
-| Criterio | JWT+RBAC | OAuth2/OIDC | Session+CSRF | Híbrido |
-|----------|----------|-------------|--------------|---------|
-| Complejidad | Baja-Media | Alta | Baja | Media-Alta |
-| Mantenimiento | Bajo | Alto(self)/Bajo(managed) | Bajo | Medio |
-| Seguridad | Medio-Alto | Alto | Alto | Bueno |
-| Revocación | Difícil(sin blacklist) | Fácil(vía IdP) | Instantánea | Parcial |
-| Offline POS | ✅ Nativo | ❌ Requiere fallback | ❌ Requiere fallback | ✅ Parcial |
-| Vendor lock-in | Ninguno | Alto(managed) | Ninguno | Ninguno |
-| Escalabilidad | Buena | Buena | Media(stateful) | Buena |
-| Alcance RNF-030..035 | ✅ Cubre | ✅ Cubre | ✅ Cubre | ✅ Cubre |
+1. **Spoofing (Suplantación de Identidad en Puestos Compartidos):** En quirófanos y urgencias, múltiples profesionales comparten una misma terminal física. **Mitigación:** Timeout forzado de 30 minutos de inactividad (RNF-030), reautenticación requerida para transiciones críticas a 'Cerrada' o 'Rechazada', y bloqueo de reanudación automática.
+2. **Tampering (Alteración de Tiempos o Prioridades):** Modificar la prioridad asistencial para saltarse la cola de atención o alterar la bitácora técnica. **Mitigación:** Máquina de estados determinista en base de datos; la alteración de prioridad exige justificación y firma de auditoría (RN-008); bitácora inmutable en append-only.
+3. **Repudiation (Repudio de Responsabilidad):** Un técnico o supervisor niega haber rechazado o cerrado una orden de soporte vital. **Mitigación:** Tabla de auditoría protegida (`solicitudes_historial_estados`) con IP de origen, usuario LDAP validado y estampa temporal UTC del servidor (RN-013).
+4. **Information Disclosure (Fuga de Datos de Salud Protegidos - PHI):** Personal asistencial introduciendo datos confidenciales de pacientes (nombre, cédula, diagnóstico) en la descripción de fallas biomédicas. **Mitigación:** Advertencias explícitas en interfaz, filtros heurísticos de prevención de ingreso de PHI y segregación lógica de roles (RNF-035).
+5. **Denial of Service (Agotamiento de Recursos por Adjuntos):** Envío masivo de imágenes de 5 MB para agotar el espacio en disco o saturar la memoria del servidor. **Mitigación:** Cuota estricta de máximo 5 archivos por requerimiento (límite acumulado de 25 MB), validación de tamaño en streaming antes de escribir en disco permanente y *rate limiting* por IP y usuario.
+6. **Elevation of Privilege (Salto de Privilegios y Falta de SoD):** Un técnico reasignándose solicitudes o modificando calendarios de SLA. **Mitigación:** Segregación estricta de funciones (SoD, Restr. Org. 2) validada en la capa de negocio y esquema RBAC rígido.
 
 ---
 
-## Hallazgos Clave
+## 3. Evaluación de Alternativas de Identidad y Autenticación (D-07)
 
-1. **Cualquier opción cubre los RNFs**. La diferencia está en complejidad, mantenimiento y trade-offs operativos.
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                  Alternativas de Autenticación para el Sistema S3IH                    │
+├──────────────────────────┬─────────────────────────────┬───────────────────────────────┤
+│ Opción 1: LDAP/AD Directo│ Opción 2: Gateway SSO       │ Opción 3: JWT sin Estado      │
+│ + Sesiones de Servidor   │ (OIDC / SAML Corporativo)   │ (Tokens en Cliente)           │
+├──────────────────────────┼─────────────────────────────┼───────────────────────────────┤
+│ - Cookies HttpOnly Seguras│ - IdP corporativo central   │ - Token viaja en encabezado   │
+│ - Invalidación inmediata │ - Soporte nativo de MFA     │ - Revocación compleja         │
+│ - Timeout estricto 30 min│ - Dependencia de red al IdP │ - Vulnerable en puestos comp. │
+│ - Cero riesgo de fuga XSS│ - Tokens de corta duración  │ - Blacklist en BD requerida   │
+└──────────────────────────┴─────────────────────────────┴───────────────────────────────┘
+```
 
-2. **POS offline es el constraint diferenciador**. OAuth2 y sesiones server-side requieren conectividad. JWT nativo o híbrido son los más pragmáticos para un POS físico que puede perder conexión.
+### Tabla Comparativa de Mecanismos de Autenticación
 
-3. **RNF-034 (secretos) es transversal**. Todas las opciones necesitan una estrategia de vault/env vars. No hay atajo.
+| Criterio de Seguridad | Opción 1: LDAP/AD Directo + Sesiones de Servidor | Opción 2: SSO OIDC/SAML Corporativo | Opción 3: JWT sin Estado |
+| :--- | :--- | :--- | :--- |
+| **Resistencia en Terminales Compartidas (RNF-030)** | **Excelente.** La sesión reside en memoria/servidor. La invalidación al expirar los 30 minutos o al presionar "Cerrar Sesión" es **instantánea y garantizada**. | **Excelente.** El proveedor de identidad gestiona la caducidad y el cierre global de sesión (*Single Sign-Out*). | **Deficiente.** Los JWTs no se invalidan fácilmente sin una tabla de revocación (blacklist) en base de datos, lo que destruye el propósito de ser "stateless". |
+| **Protección contra Ataques XSS / Robo de Tokens** | **Máxima.** Las cookies de sesión se emiten con banderas `HttpOnly; Secure; SameSite=Strict`. Ningún script inyectado vía XSS puede extraer la sesión. | **Alta.** Si los tokens se almacenan en cookies de servidor seguras. | **Baja-Media.** Si el JWT se almacena en `localStorage` o `sessionStorage`, es vulnerable a exfiltración completa mediante XSS. |
+| **Integración con Infraestructura Hospitalaria** | **Nativa y Directa.** Toda red hospitalaria dispone de controladores de dominio Microsoft Active Directory o servidores OpenLDAP corporativos. | **Muy Buena.** Requiere que la red hospitalaria cuente con un IdP configurado (ej. Keycloak, ADFS, Ping, Okta). | **Aislada.** Exige gestionar el ciclo de vida de usuarios de forma interna o sincronizada. |
+| **Complejidad de Mantenimiento para TI Interno** | **Baja.** Protocolo estándar ampliamente dominado por el personal de infraestructura hospitalaria. | **Media-Alta.** Requiere coordinar registros de clientes, secretos de cliente y rotación de certificados federados. | **Media.** Requiere implementación propia de refresh tokens y blacklists. |
+| **Tolerancia a Contingencias de Red** | **Buena.** Permite configurar una cuenta local de contingencia fuertemente protegida (Argon2id) para emergencias aisladas. | **Rígida.** Si el IdP corporativo sufre una interrupción, el sistema queda completamente inaccesible. | **Buena.** Depende de la validación local de firmas de token. |
 
-4. **RNF-032 (TLS) es independiente**. Todas las opciones requieren TLS; no es factor de decisión entre ellas.
-
-5. **La complejidad del híbrido (Opción 4) es el riesgo principal**. Dos mecanismos de auth = dos superficies de error. Si el POS puede tolerar JWT puro, es más simple.
-
-6. **RNF-035 (auditoría) requiere middleware dedicado**. No depende de la opción de auth seleccionada.
+### Decisión de Identidad: Opción 1 (Recomendada) con Capacidad OIDC
+Se selecciona la **Opción 1: Autenticación contra Directorio Activo (AD/LDAP) corporativo con Sesiones de Servidor Seguras (Cookies HttpOnly)** como mecanismo primario:
+- Cumple directamente el requisito de **cierre automático a los 30 minutos** (RNF-030).
+- Resguarda las credenciales de los puestos de trabajo compartidos en quirófano.
+- Mantiene arquitectura modular abierta para transicionar a **Opción 2 (OIDC)** mediante configuración si la dirección de TI habilita un proveedor institucional federado.
 
 ---
 
-## Recomendación de Evaluación para Solution Leader
+## 4. Matriz de Autorización Basada en Roles (RBAC) y Segregación de Funciones
 
-Las opciones viables son **JWT+RBAC (Opción 1)** y **Híbrido (Opción 4)**. La decisión depende de:
+Se establece una matriz RBAC multidimensional estricta bajo el **principio de mínimo privilegio (RNF-031)** y **segregación de funciones (Restr. Org. 2)**:
 
-- ¿El POS necesita funcionar offline? → Opción 1 o 4.
-- ¿Se puede tolerar complejidad de dos mecanismos? → Si no, Opción 1.
-- ¿La revocación instantánea de sesión es crítica? → Si sí, considerar Opción 3 (pero requiere POS online).
+| Módulo / Acción del Sistema | Solicitante Asistencial | Técnico Resolutor | Supervisor de Guardia | Administrador de TI | Comité de Calidad / Auditoría |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Radicar Solicitud Ordinaria / Expedita** | ✅ Permitido | ❌ Denegado | ✅ Permitido | ❌ Denegado | ❌ Denegado |
+| **Cancelar Solicitud Propia (antes de proceso)** | ✅ Permitido (RN-009) | ❌ Denegado | ❌ Denegado | ❌ Denegado | ❌ Denegado |
+| **Asignar / Reasignar Solicitudes de Guardia** | ❌ Denegado | ❌ Denegado | ✅ Permitido (RN-008) | ✅ Permitido | ❌ Denegado |
+| **Tomar en Proceso Solicitud Asignada** | ❌ Denegado | ✅ Solo asignadas | ❌ Denegado | ❌ Denegado | ❌ Denegado |
+| **Pausar SLA a Estado 'En Espera'** | ❌ Denegado | ✅ Con motivo (RN-006)| ✅ Permitido | ❌ Denegado | ❌ Denegado |
+| **Registrar Informe Técnico y Pasar a 'Atendida'** | ❌ Denegado | ✅ Obligatorio (RN-007)| ❌ Denegado | ❌ Denegado | ❌ Denegado |
+| **Rechazar Solicitud Técnica** | ❌ Denegado | ❌ Denegado | ✅ Con causal (RN-009)| ❌ Denegado | ❌ Denegado |
+| **Reapertura de Solicitud ($\le 48\text{ h}$ post-atención)** | ✅ Permitido (RN-010) | ❌ Denegado | ✅ Permitido | ❌ Denegado | ❌ Denegado |
+| **Configurar Catálogos, Sedes y Umbrales de SLA** | ❌ Denegado | ❌ Denegado | ❌ Denegado | ✅ Exclusivo TI | ❌ Denegado |
+| **Consultar Pistas de Auditoría e Indicadores** | ❌ Solo solicitudes propias | ❌ Solo órdenes asignadas | ✅ Reportes de su servicio | ✅ Monitoreo técnico | ✅ Solo Lectura Completo |
 
-**No evaluar Opción 2 (OAuth2) sin resolver el problema de POS offline primero.** El IdP externo es un punto de fallo que no se alinea con la naturaleza de POS físico.
+### Regla Inviolable de Segregación de Funciones (SoD):
+- Un usuario con rol de **Técnico Resolutor** tiene terminantemente bloqueada la capacidad de auto-aprobarse solicitudes o cambiar estados a 'Cerrada' sin confirmación de conformidad asistencial.
+- Un usuario con rol de **Solicitante Asistencial** no puede modificar estados técnicos una vez que la orden transicionó a 'En Proceso'.
+- El rol **Administrador de TI** no puede alterar los registros históricos de intervenciones técnicas ni los logs de auditoría.
+
+---
+
+## 5. Seguridad en Carga y Resguardo de Adjuntos Técnicos (RNF-034, D-04)
+
+Los archivos adjuntos representan el vector de ataque más vulnerable para ejecución remota de código (RCE), desbordamiento de almacenamiento y path traversal. Se implementa una **tubería de validación defensiva en 6 capas**:
+
+```mermaid
+flowchart TD
+    A["Petición Multipart (Archivo adjunto ≤ 5 MB)"] --> B["Capa 1: Validación de Cuota y Tamaño (Content-Length ≤ 5.242.880 bytes)"]
+    B --> C["Capa 2: Validación de Extensión (.pdf, .jpg, .jpeg, .png)"]
+    C --> D["Capa 3: Inspección de Firma Binaria / Magic Numbers (libmagic real)"]
+    D --> E["Capa 4: Sanitización Absoluta de Nombre (UUID-v4.ext aleatorio)"]
+    E --> F["Capa 5: Almacenamiento Desacoplado Fuera del Web Root"]
+    F --> G["Capa 6: Cabeceras de Descarga Segura (Content-Disposition: attachment)"]
+```
+
+1. **Capa 1 (Cuota y Tamaño Estricto):** La petición HTTP se rechaza inmediatamente si excede 5 MB ($5.242.880\text{ bytes}$) a nivel del proxy inverso (Nginx: `client_max_body_size 5M`) y de la aplicación.
+2. **Capa 2 (Lista Blanca de Extensiones):** Solo se admiten extensiones en minúsculas: `.pdf`, `.jpg`, `.jpeg`, `.png`. Cualquier extensión de script executable (`.php`, `.sh`, `.exe`, `.js`, `.phtml`, etc.) es rechazada.
+3. **Capa 3 (Inspección de Firmas Binarias / Magic Numbers):** El backend no confía en la cabecera `Content-Type` enviada por el navegador. Inspecciona los primeros bytes del flujo binario:
+   - PDF: `%PDF-` (`0x25 0x50 0x44 0x46`)
+   - JPEG: `0xFF 0xD8 0xFF`
+   - PNG: `0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A`
+4. **Capa 4 (Sanitización y Ofuscación de Nombre):** El nombre original del archivo se descarta para el almacenamiento en disco. El archivo físico se renombra exclusivamente a `<UUIDv4>.<extension_validada>`, eliminando cualquier posibilidad de ataques de *Directory Traversal* (`../../`).
+5. **Capa 5 (Almacenamiento Fuera de la Raíz Web):** Los archivos residen en una ruta desacoplada del sistema de archivos sin permisos de ejecución (`noexec` en el punto de montaje NAS/NFS) o en un bucket privado de MinIO.
+6. **Capa 6 (Descarga Segura sin Ejecución en Línea):** Las descargas de archivos adjuntos se sirven obligatoriamente con cabeceras que impiden la ejecución en el contexto del navegador:
+   ```http
+   Content-Disposition: attachment; filename="evidencia_tecnica.pdf"
+   X-Content-Type-Options: nosniff
+   Content-Security-Policy: default-src 'none'
+   ```
+
+---
+
+## 6. Prevención y Aislamiento de Datos de Salud Protegidos (Zero-PHI - RNF-035)
+
+Para satisfacer la restricción de **aislamiento estricto de historias clínicas de pacientes**:
+1. **Diseño de Formularios:** Ningún campo del sistema solicita, insinúa ni titula datos de pacientes (cero campos de nombres de paciente, diagnósticos médicos, números de cama clínica asociados a identidad o tratamientos).
+2. **Filtros de Expresiones Regulares en Validación:** Se implementa un filtro preventivo en el backend que detecta y rechaza la inserción de números de identificación nacional / cédulas o formatos típicos de historia clínica hospitalaria dentro del campo de descripción del daño técnico.
+3. **Aviso Legal Vinculante en Pantalla:** Banner visible permanente en el formulario de radicación: *"Sistema exclusivo para mantenimiento técnico y soporte logístico. Queda terminantemente prohibido ingresar datos personales o diagnósticos médicos de pacientes conforme a la ley de protección de datos en salud."*
+
+---
+
+## 7. Gestión de Secretos, Entornos y Seguridad de APIs (RNF-032, RNF-033)
+
+1. **Gestión Externa de Secretos (Zero-Secrets in Code):**
+   - Queda prohibido escribir contraseñas de bases de datos, claves LDAP o secretos de sesión en archivos PHP, JS, YAML o markdown versionados en Git.
+   - Todo secreto se inyecta en tiempo de ejecución mediante variables de entorno del contenedor Docker/Podman (`.env` local ignorado por Git, inyectado por el orquestador).
+2. **Protección Criptográfica de Comunicaciones:**
+   - Cifrado obligatorio TLS 1.3 / HTTPS. Se configura la cabecera HSTS (*HTTP Strict Transport Security*):
+     ```http
+     Strict-Transport-Security: max-age=31536000; includeSubDomains
+     ```
+3. **Cabeceras de Seguridad HTTP Globales:**
+   - `X-Frame-Options: DENY` (previene ataques de Clickjacking en estaciones de enfermería).
+   - `X-Content-Type-Options: nosniff`.
+   - `Referrer-Policy: strict-origin-when-cross-origin`.
+   - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;`.
+4. **Defensa contra Ataques de Fuerza Bruta y DoS:**
+   - *Rate Limiting* estricto en el endpoint de autenticación `/login`: Máximo 5 intentos fallidos por IP/usuario cada 15 minutos.
+   - Bloqueo temporal y notificación en bitácora de seguridad ante detección de intentos anómalos.
+
+---
+
+## 8. Pista de Auditoría Legal e Inmutabilidad (RN-012, RN-013, RF-072)
+
+En cumplimiento de las leyes de acreditación hospitalaria que exigen **retención inmutable de al menos 5 años**:
+1. **Atributos Obligatorios por Cada Transacción:**
+   - `usuario_id` (identificador inmutable del usuario autenticado vía LDAP).
+   - `ip_origen` (dirección IP corporativa del cliente, capturada de forma confiable tras el reverse proxy mediante cabecera `X-Forwarded-For` sanitizada).
+   - `fecha_hora_utc` (estampa de tiempo sincronizada generada exclusivamente por el reloj del servidor, nunca por el cliente).
+   - `estado_anterior` y `estado_nuevo`.
+   - `justificacion_motivo` (obligatoria con longitud $\ge 20$ caracteres en cancelaciones, rechazos o reaperturas).
+2. **Garantía Criptográfica y de No Repudio:**
+   - La tabla `solicitudes_historial_estados` se resguarda con permisos revocados (`REVOKE UPDATE, DELETE`).
+   - Se incluye un campo `hash_registro` (SHA-256 encadenado del registro anterior) para verificar matemáticamente que la bitácora no ha sido manipulada en la base de datos por personal con acceso a nivel de infraestructura.
+
+---
+
+## 9. Dictamen y Traspaso a DevOps
+
+El especialista en seguridad concluye que:
+> 1. La arquitectura seleccionada (**Monolito Modular con Sesiones de Servidor Seguras integradas a Directorio Activo/LDAP**) ofrece el máximo nivel de protección para estaciones compartidas en quirófanos y enfermería, eliminando la vulnerabilidad de tokens desasistidos.
+> 2. La tubería de 6 capas para subida de archivos adjuntos mitiga completamente el riesgo de saturación de disco y ejecución remota de código.
+> 3. La política *Zero-PHI* y el control estricto de RBAC con segregación de funciones blindan a la institución frente a sanciones de privacidad médica.
+
+El siguiente paso obligatorio corresponde a **`devops-architect`**, quien formalizará la infraestructura, contenedores OCI, exclusión de Kubernetes, RPO/RTO y observabilidad en:  
+📄 [`proyecto/03_resultados/06_devops_analysis.md`](file:///d:/mod3proyectoclone/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO/MODULO_3_DESARROLLO_AL_LADO_DEL_CLIENTE_Y_SERVIDOR_WEB/architecture-skills-framework/proyecto/03_resultados/06_devops_analysis.md).

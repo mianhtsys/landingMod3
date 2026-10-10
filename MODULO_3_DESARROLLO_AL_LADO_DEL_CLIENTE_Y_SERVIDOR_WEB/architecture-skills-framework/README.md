@@ -17,7 +17,7 @@ proyecto/03_resultados/02_decision_scope.md
 
 
 
-Propón de 4 a 6 alternativas arquitectónicas.
+Propón de 2 a 3 alternativas arquitectónicas.
 Compara complejidad, escalabilidad, consistencia, costo operativo y mantenibilidad.
 No uses microservicios por defecto.
 No elijas aún una base de datos definitiva.

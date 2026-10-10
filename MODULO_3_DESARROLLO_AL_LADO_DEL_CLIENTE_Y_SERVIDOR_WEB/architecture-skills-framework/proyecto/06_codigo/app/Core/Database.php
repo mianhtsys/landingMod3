@@ -30,6 +30,11 @@ final class Database
         return self::$pdo;
     }
 
+    public static function setConnection(?PDO $pdo): void
+    {
+        self::$pdo = $pdo;
+    }
+
     public static function ping(): bool
     {
         try {

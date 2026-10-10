@@ -1,151 +1,244 @@
-# Paso 02 — Modelo conceptual de datos
+# Paso 02 — Modelo Conceptual de Datos
 
-**Workflow:** 02_database_workflow — Paso 02
-**Skill utilizado:** `database-schema-designer`
-**Entrada:** `01_requisitos_datos/requisitos_datos.md`, decisiones APROBADAS.
-**Restricción:** sin SQL, sin tipos de datos de motor, sin claves físicas. Solo entidades, atributos conceptuales, relaciones, cardinalidades y reglas.
+**Workflow:** `02_database_workflow` — Paso 02  
+**Skill utilizado:** `database-schema-designer` (instalado en `.agents/skills/`)  
+**Proyecto:** Sistema de Seguimiento de Solicitudes Internas Hospitalarias (S3IH / Red de 4 hospitales)  
+**Entrada:** `01_requisitos_datos/requisitos_datos.md`, decisiones vigentes en `04_decisiones/`, ADR-001  
+**Restricción de esta fase:** Sin sentencias SQL, sin tipos específicos de motor (VARCHAR, INT, etc.), sin llaves primarias/foráneas físicas. Exclusivamente entidades del dominio, atributos conceptuales, relaciones, cardinalidades y reglas de negocio conceptuales.  
 
-## 1. Alcance
+---
 
-Dominio: tienda omnicanal de alimentos (POS + web, inventario compartido, compras, pagos, devoluciones, transferencias, auditoría). Fuera de alcance inicial: contabilidad, nómina, manufactura, marketplace, rutas, app móvil.
+## 1. Alcance y Contexto Conceptual
 
-## 2. Diccionario de entidades
+El modelo conceptual captura la realidad operativa de la red hospitalaria de hasta 4 hospitales para la gestión, seguimiento, auditoría y resolución de solicitudes internas entre servicios clínicos asistenciales (Urgencias, Quirófano, UCI, etc.) y unidades resolutoras técnicas (Biomédico, Infraestructura, Farmacia Interna, Soporte TI y Esterilización).
 
-### 2.1 Identidad y acceso (RF-001, RNF-030/031/033)
+El modelo prioriza la **integridad de estados en soporte vital (RN-005)**, la **concurrencia de guardias 24/7**, el **cómputo de SLA dual**, la **inmutabilidad y no repudio legal (RN-012/013)** y el **aislamiento estricto de historias clínicas (Zero-PHI, RNF-035)**.
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **Usuario** | id, nombre, email, hash contraseña (Argon2id), estado, fechas | email único; contraseñas nunca en texto plano (RN/RNF-033) |
-| **Rol** | id, nombre, estado | nombre único |
-| **Permiso** | id, código, descripción | código único |
-| **Usuario–Rol** | usuario, rol | N:M |
-| **Rol–Permiso** | rol, permiso | N:M |
-| **TokenBlacklist** | hash token, expiración | hash único; borrado por expiración (§15) |
+---
 
-### 2.2 Organización (RF-002, RF-010)
+## 2. Diccionario de Entidades Conceptuales
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **Sucursal** | id, nombre, dirección, estado | pertenece a la empresa; crecimiento sin rediseño (RNF-010) |
-| **Caja/POS** | id, sucursal, código, estado | código único por sucursal |
-| **Cliente** | id, identificación/contacto, estado | modelo definitivo PENDIENTE (DB-P08); cliente opcional en venta POS |
+---
 
-### 2.3 Catálogo y precios (RF-020)
+### 2.1 Dominio de Organización Multisede y Recursos Humanos (RF-001 a RF-004)
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **Categoría** | id, nombre, categoría padre (opcional) | jerarquía; nombre en su nivel |
-| **Producto** | id, SKU/código, nombre, categoría, unidad, estado | código único; sin precios embebidos (2FN) |
-| **Precio** | producto, sucursal, monto, moneda, vigencia | alcance **por sucursal** (DB-P09 CERRADO 2026-09-22: sin precio global) |
-| **Promoción** | id, reglas, vigencia, estado | se aplica a productos/categorías |
+#### Entidad: SedeHospitalaria
+Representa cada uno de los centros hospitalarios físicos que integran la red de salud (hospital central y sedes periféricas).
+- **Atributos Conceptuales:** Identificador, código institucional (único, ej. `H1` a `H4`), nombre del hospital, dirección física, teléfono institucional, es sede central (booleano), estado operativo.
+- **Reglas Conceptuales:**
+  - Red dimensionada para un máximo de 4 hospitales (2 iniciales).
+  - El código institucional es inmutable y forma el prefijo del código correlativo de solicitudes (RN-001).
 
-### 2.4 Compras (RF-030, RF-031, RN-05)
+#### Entidad: ServicioHospitalario
+Representa cada departamento, unidad asistencial o servicio técnico dentro de un hospital.
+- **Atributos Conceptuales:** Identificador, sede hospitalaria a la que pertenece, código de servicio, nombre del servicio, tipo de servicio (Asistencial vs. Resolutor Técnico), ubicación física detallada (piso, ala, pabellón), estado operativo.
+- **Reglas Conceptuales:**
+  - Un servicio pertenece a exactamente una sede hospitalaria.
+  - Los servicios asistenciales generan solicitudes; los servicios resolutores diagnostican y atienden solicitudes.
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **Proveedor** | id, nombre, contacto, estado | identificador único |
-| **OrdenCompra** | proveedor, número, estado, fechas, totales | número único |
-| **OrdenCompraÍtem** | orden, producto, cantidad, precio pactado | 1:N con OrdenCompra |
-| **Recepción** | orden de compra, estado, fecha, usuario | solo al confirmarse actualiza inventario (RN-05) |
-| **RecepciónÍtem** | recepción, producto, cantidad recibida | admite parcial/total (RF-031) |
+#### Entidad: Usuario
+Personal asistencial, técnico, supervisor o administrativo con acceso al sistema.
+- **Atributos Conceptuales:** Identificador, nombre de usuario corporativo (LDAP), correo electrónico institucional, nombre y apellidos completos, sede hospitalaria principal, servicio de adscripción, rol asignado, estado activo/inactivo, estampa de último acceso.
+- **Reglas Conceptuales:**
+  - Autenticado contra el Directorio Activo institucional (RNF-030).
+  - Toda acción en el sistema debe asociarse de forma no repudiable a un usuario identificado (RN-013).
 
-### 2.5 Inventario (RF-040/041/062/064, RN-01…RN-04, RN-06, RNF-005/020)
+#### Entidad: Rol
+Perfil funcional que define los privilegios del usuario bajo el principio de mínimo privilegio (RNF-031).
+- **Atributos Conceptuales:** Código de rol (`SOLICITANTE_ASISTENCIAL`, `TECNICO_RESOLUTOR`, `SUPERVISOR_GUARDIA`, `ADMINISTRADOR_TI`, `AUDITOR_CALIDAD`), nombre descriptivo, conjunto de permisos operativos.
+- **Reglas Conceptuales:**
+  - Segregación estricta de funciones (SoD): un técnico no puede auto-aprobarse solicitudes; un solicitante no puede cambiar estados técnicos una vez iniciada la atención.
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **Inventario** | producto, sucursal, stock_available, stock_reserved, stock_sold, versión | unicidad producto↔sucursal; stock no negativo (RN-02); D-01 (available/reserved) |
-| **Reserva** | orden, producto, sucursal, cantidad, estado, expira en, creado en | estados: pending, confirmed, expired, cancelled; TTL 15 min (`reserva_ttl_minutos`); reserva web bloquea stock POS (DB-P01/P02 CERRADOS) |
-| **MovimientoInventario** | producto, sucursal, tipo (entrada/salida/reserva/ajuste/devolución/transferencia/recepción), cantidad, referencia origen, usuario, motivo, fecha | **append-only**; origen de toda venta confirmada (RN-01); auditabilidad (RF-090) |
-| **AjusteStock** | producto, sucursal, cantidad, motivo, usuario, fecha | motivo/usuario obligatorios (RN-04) |
-| **Transferencia** | origen, destino, estado, usuario, fechas | estados controlados (RN-06) |
-| **TransferenciaÍtem** | transferencia, producto, cantidad | 1:N |
+#### Entidad: CuadrillaGuardia y CuadrillaMiembro
+Equipos técnicos de turno rotativo 24/7 por especialidad resolutora y sede.
+- **Atributos Conceptuales:**
+  - *CuadrillaGuardia:* Identificador, sede hospitalaria, servicio resolutor asociado, nombre de cuadrilla, turno operativo (mañana, tarde, noche, guardia 24h), estado.
+  - *CuadrillaMiembro:* Cuadrilla de guardia, técnico resolutor asignado.
+- **Reglas Conceptuales:**
+  - Permite la asignación ágil de órdenes a un equipo de guardia completo cuando no se designa un técnico individual (RF-004, RF-030).
 
-### 2.6 Ventas y pedidos (RF-050/051/060/061/062/064, RNF-021/022, RN-07/08)
+---
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **OrdenVenta** | número, canal (POS/web), cliente (opcional en POS), sucursal origen/servicio, estado, total, key idempotencia, fulfillment (entrega/retiro), fechas | número único; idempotencia (RN-07/RF-042); sin DELETE físico (RN-08); fulfillment bajo DB-P10 |
-| **OrdenVentaÍtem** | orden, producto, cantidad, precio unitario, subtotal | N con OrdenVenta |
-| **CarritoWeb** | cliente/sesión, líneas, actualizado en | PERSISTENCIA EN BD confirmada 2026-09-22; TTL de purga = parámetro (ver §5) |
-| **CarritoWebÍtem** | carrito, producto, cantidad | 1:N |
+### 2.2 Dominio de Catálogos Tipificados y Políticas de SLA (RF-010 a RF-014)
 
-### 2.7 Pagos (RF-050/063, RNF-021/042, D-02/D-03)
+#### Entidad: CatalogoSolicitudTipo
+Clasificación tipificada y estandarizada de requerimientos técnicos e incidencias por especialidad.
+- **Atributos Conceptuales:** Identificador, servicio resolutor competente, código tipificado, nombre de la solicitud/falla, descripción del alcance, prioridad asistencial sugerida por defecto, estado.
+- **Reglas Conceptuales:**
+  - Estandariza las solicitudes evitando descripciones ambiguas en averías biomédicas o edilicias.
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **PagoTransacción** | orden, proveedor pago, referencia externa, monto, estado, key idempotencia, fechas | referencia única; Saga con compensación; sin transacción SQL abierta esperando externo |
-| **OutboxEvento** | agregado, tipo evento, payload, correlation id, estado, fechas | insertado en la MISMA transacción de negocio (§16) |
-| **IdempotencyKey** | key (UUID), operación, respuesta/resultado, expiración | retención 30 días (validar en Paso 07); limpieza periódica |
+#### Entidad: PoliticaSLA
+Reglas temporales máximas de primera respuesta (MTTA) y resolución (MTTR) acordadas por tipo de requerimiento y prioridad.
+- **Atributos Conceptuales:** Identificador, tipo de solicitud, prioridad asistencial (Vital/Urgente, Alta, Media, Baja), tiempo máximo de primera respuesta (MTTA en minutos), tiempo máximo de resolución final (MTTR en minutos), estado.
+- **Reglas Conceptuales:**
+  - El cumplimiento de estas metas determina las alertas al 75% y el escalamiento jerárquico (RF-012, RF-052).
 
-### 2.8 Devoluciones (RF-070, RN-08, §22)
+#### Entidad: CalendarioSLA y DiaInhabilFeriado
+Define el cómputo temporal diferenciado del reloj de SLA (RF-013).
+- **Atributos Conceptuales:**
+  - *CalendarioSLA:* Código de calendario (`CONTINUO_24_7` vs. `HABIL_ADMINISTRATIVO`), hora inicio jornada, hora fin jornada, días laborales de la semana.
+  - *DiaInhabilFeriado:* Fecha del calendario, descripción del feriado, sede específica (o aplicable a toda la red).
+- **Reglas Conceptuales:**
+  - Para prioridades *Vital* y *Alta*, el reloj de SLA computa de forma ininterrumpida los 365 días del año las 24 horas del día.
+  - Para prioridades *Media* y *Baja*, el reloj computa exclusivamente en horario hábil administrativo descontando fines de semana y feriados.
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **OrdenDevolución** | orden original, cliente, usuario, estado, motivo, monto, fechas | registro NUEVO relacionado; nunca modifica/destructa la original |
-| **OrdenDevoluciónÍtem** | devolución, producto original, cantidad, monto | 1:N |
+#### Entidad: CausalEstandarizada
+Catálogo de justificaciones obligatorias para eventos excepcionales del ciclo de vida (RF-014).
+- **Atributos Conceptuales:** Código de causal, tipo de causal (`SUSPENSION_ESPERA`, `RECHAZO_TECNICO`, `CANCELACION_USUARIO`, `REAPERTURA`), descripción estandarizada, estado.
+- **Reglas Conceptuales:**
+  - Toda suspensión a 'En Espera', rechazo, cancelación o reapertura debe vincularse obligatoriamente a una causal catalogada más su texto explicativo detallado (RN-006, RN-009).
 
-### 2.9 Reportes, configuración y auditoría (RF-080/090/100, RNF-050)
+---
 
-| Entidad | Atributos conceptuales | Reglas |
-|---|---|---|
-| **ConfiguraciónSistema** | clave, valor, actualizado en, actualizado por | clave única; RF-100; RNF-002; sin redeploy |
-| **Auditoría** | acción, entidad afectada, datos previos/nuevos, usuario, fecha/hora, motivo, correlation id | operaciones críticas (RF-090) |
+### 2.3 Dominio Central: Solicitudes y Concurrencia (RF-020 a RF-033)
 
-**Auditoría transversal:** toda entidad de negocio llevará los campos obligatorios `user_create`, `user_update`, `user_created_at`, `user_update_at` (decisión §9), tratados aquí como estándar de auditoría, no como atributo de negocio.
+#### Entidad: Solicitud
+Entidad transaccional central que representa el requerimiento de servicio hospitalario.
+- **Atributos Conceptuales:**
+  - Identificador conceptual único.
+  - Código correlativo institucional inmutable (`H1-2026-XXXXXX`, RN-001).
+  - Sede hospitalaria de origen.
+  - Servicio asistencial solicitante.
+  - Servicio resolutor competente.
+  - Tipo de solicitud tipificada.
+  - Ubicación física precisa (área, sala, quirófano, cama clínica).
+  - Nivel de prioridad asistencial (Vital, Alta, Media, Baja, RN-004).
+  - Descripción técnica detallada del problema o insumo requerido (Zero-PHI, RNF-035).
+  - Estado del ciclo de vida actual (Registrada, Asignada, En Proceso, En Espera, Atendida, Cerrada, Rechazada, Cancelada).
+  - Es radicación expedita (booleano, RF-021).
+  - Usuario solicitante.
+  - Técnico resolutor individual asignado (opcional si asignada a cuadrilla).
+  - Cuadrilla de guardia asignada (opcional si asignada a técnico).
+  - Versión de concurrencia optimista (`version` numérico incremental, D-01).
+  - Fechas e hitos temporales del servidor en UTC (radicación, asignación, inicio proceso, atención, cierre).
+- **Reglas Conceptuales:**
+  - El código correlativo es inmutable y único por sede y año (RN-001).
+  - Prohibición de borrado físico: una solicitud nunca se elimina (RN-012).
+  - Concurrencia optimista: cualquier actualización valida la versión leída previamente para prevenir colisiones durante cambios de guardia concurrentes.
 
-## 3. Relaciones y cardinalidades
+#### Entidad: ControlTiempoSLA
+Seguimiento dinámico del estado temporal del requerimiento frente a la política de SLA.
+- **Atributos Conceptuales:** Solicitud asociada, calendario aplicable, fecha y hora límite de asignación (MTTA), fecha y hora límite de resolución (MTTR), tiempo total consumido acumulado (en segundos), está pausado actualmente (booleano), fecha y hora de la última pausa, tiempo total pausado acumulado (en segundos), fecha tentativa de reanudación, umbral de alerta 75% alcanzado (booleano), escalamiento 100% ejecutado (booleano).
+- **Reglas Conceptuales:**
+  - Al transicionar a 'En Espera', se activa la pausa y se congela el cómputo de SLA (RN-006).
+  - Al reanudar a 'En Proceso', se suma el intervalo pausado al acumulado de pausas y se posterga la fecha límite de MTTR de forma exacta.
 
-| # | Relación | Cardinalidad | Nota |
-|---|---|---|---|
-| R1 | Sucursal — Caja/POS | 1:N | caja pertenece a una sucursal |
-| R2 | Categoría — Categoría (padre) | 1:N opcional | jerarquía |
-| R3 | Categoría — Producto | 1:N | producto tiene una categoría principal |
-| R4 | Producto/Sucursal — Precio | 1:N (por producto y por sucursal) | versiones/vigencias de precio; alcance **por sucursal** (DB-P09 cerrado) |
-| R5 | Producto ↔ Promoción | N:M | productos afectados |
-| R6 | Proveedor — OrdenCompra | 1:N | |
-| R7 | OrdenCompra — OrdenCompraÍtem | 1:N | |
-| R8 | OrdenCompra — Recepción | 1:N | recepciones parciales múltiples |
-| R9 | Recepción — RecepciónÍtem | 1:N | |
-| R10 | Producto ↔ Sucursal → Inventario | 1:1 (por par) | unicidad producto-sucursal |
-| R11 | OrdenVenta — Reserva | 1:N | reservas por línea/orden |
-| R12 | OrdenVenta — OrdenVentaÍtem | 1:N | |
-| R13 | OrdenVenta — PagoTransacción | 1:N | reintentos/métodos múltiples |
-| R14 | OrdenVenta — OrdenDevolución | 1:N | devoluciones parciales sucesivas |
-| R15 | OrdenDevolución — OrdenDevoluciónÍtem | 1:N | |
-| R16 | OrdenVenta/Recepción/Ajuste/Transferencia — MovimientoInventario | 1:N vía referencia | el movimiento apunta a su documento origen |
-| R17 | Transferencia — TransferenciaÍtem | 1:N | |
-| R18 | Cliente — OrdenVenta | 1:N | cliente opcional (venta balda/POS) — DB-P08 |
-| R19 | Sucursal — OrdenVenta | 1:N | sucursal de origen/servicio |
-| R20 | Usuario — Auditoría / MovimientoInventario / Ajuste | 1:N | responsable |
-| R21 | Rol ↔ Permiso | N:M | |
-| R22 | Usuario ↔ Rol | N:M | |
-| R23 | CarritoWeb — CarritoWebÍtem | 1:N | si se persiste (§5) |
+---
 
-## 4. Reglas de negocio incrustadas en el modelo
+### 2.4 Dominio de Ciclo de Vida, Bitácora e Informes (RF-040 a RF-047, RF-060)
 
-- RN-01: sin movimiento de inventario no hay venta confirmada → toda OrdenVenta confirmada debe tener movimientos de salida asociados.
-- RN-02: `stock_available - stock_reserved ≥ 0` y no negativo tras ventas normales.
-- RN-03: toda Reserva tiene `expira_en` derivado de parámetro configurable (`ConfiguraciónSistema`).
-- RN-04: AjusteStock exige usuario, motivo, fecha; genera Auditoría y MovimientoInventario.
-- RN-05: Recepción solo afecta Inventario en estado confirmado.
-- RN-06: Transferencia con máquina de estados (p. ej. draft → in_transit → received/cancelled).
-- RN-07: operaciones críticas llevan IdempotencyKey / constraints únicos.
-- RN-08: OrdenVenta, PagoTransacción, MovimientoInventario y OrdenDevolución no se eliminan físicamente; la devolución es entidad nueva.
+#### Entidad: HistorialEstadoSolicitud (Append-Only)
+Registro inalterable de cada una de las transiciones de estado por las que atraviesa una solicitud.
+- **Atributos Conceptuales:** Identificador de transición, solicitud asociada, estado de origen, estado de destino, causal estandarizada aplicada, justificación textual obligatoria, usuario que ejecutó la transición, dirección IP corporativa de origen, estampa temporal del servidor en UTC.
+- **Reglas Conceptuales:**
+  - Estrictamente append-only: inserción continua sin posibilidad de modificación ni eliminación física (RN-012, RN-013).
+  - Valida que la transición se ajuste estrictamente a la máquina de estados determinista (RN-005).
 
-## 5. Supuestos y pendientes explícitos (no se inventan decisiones)
+#### Entidad: ReasignacionSolicitud
+Registro de auditoría específico para cambios de técnico o cuadrilla responsable (RF-031).
+- **Atributos Conceptuales:** Solicitud, técnico/cuadrilla anterior, técnico/cuadrilla nuevo, motivo formal de la reasignación, usuario autorizador, estampa temporal UTC.
 
-1. **Carrito web:** confirmado 2026-09-22 — se persiste en BD (`sales_carrito_web*`); TTL de purga de carrito sigue sin definirse en RF (parámetro, no inventar).
-2. **DB-P01/P02 CERRADOS (2026-09-22):** la reserva web **sí bloquea** stock para POS (descuenta `stock_available` al crearse); expiración a **15 minutos** (`reserva_ttl_minutos` en `core_configuracion`); job `SKIP LOCKED` → `expired` + movimiento `liberacion`, idempotente por UPDATE condicional. Estados pending/confirmed/expired/cancelled confirmados.
-3. **DB-P08:** alcance del modelo de Cliente (identificación única global vs por sucursal) pendiente.
-4. **DB-P09 CERRADO (2026-09-22): precio por sucursal**, sin fallback global; el lookup de precio requiere `sucursal_id`.
-5. **DB-P10:** campos exactos de fulfillment (entrega vs retiro) pendientes.
-6. **DB-P12:** entidades maestras (Producto, Proveedor, Cliente, Categoría) no asumen soft delete; se decidirá por entidad.
+#### Entidad: InformeAtencionTecnica
+Documentación obligatoria del trabajo realizado por el técnico antes de dar por atendida la solicitud (RF-044, RN-007).
+- **Atributos Conceptuales:** Solicitud asociada (relación 1:1), diagnóstico técnico final de la avería, descripción detallada de acciones correctivas ejecutadas, tiempo real de dedicación (minutos trabajados), condición operativa final del activo o área intervenida, repuestos e insumos utilizados (o declaración expresa de no requerir repuestos), estampa temporal de atención.
+- **Reglas Conceptuales:**
+  - Precondición ineludible: ninguna solicitud puede pasar al estado 'Atendida' o 'Cerrada' sin la existencia previa y validada de este informe (RN-007).
 
-## 6. Criterios de salida
+#### Entidad: ReaperturaSolicitud
+Control de solicitudes reabiertas ante inconformidad asistencial (RF-047, RN-010).
+- **Atributos Conceptuales:** Solicitud, motivo justificado de la reapertura, usuario solicitante que reabre, estampa temporal UTC.
+- **Reglas Conceptuales:**
+  - Solo permitida dentro de una ventana máxima estricta de 48 horas continuas post-atención (RN-010). Transcurrido ese plazo, el sistema bloquea conceptualmente la reapertura.
 
-- [x] Entidades, atributos conceptuales, relaciones y cardinalidades definidos.
-- [x] Reglas RN-01…RN-08 reflejadas.
-- [x] Pendientes DB-P* y supuestos declarados.
-- [x] Sin SQL ni tipos de motor.
+#### Entidad: BitacoraNotaTecnica (Append-Only)
+Línea de tiempo cronológica para seguimiento operativo y comunicaciones durante la atención (RF-060).
+- **Atributos Conceptuales:** Solicitud, tipo de entrada (nota técnica, cambio de turno/guardia, repuesto pedido a bodega, comunicación con solicitante), contenido del mensaje, usuario autor, dirección IP, estampa temporal UTC.
 
-**Estado:** Paso 02 COMPLETADO → siguiente: Paso 03 (diagrama E-R Mermaid, `02_modelo_conceptual/diagrama_er.md`).
+---
+
+### 2.5 Dominio de Evidencias Técnicas, Asincronía y Auditoría Legal (RF-022, RF-072)
+
+#### Entidad: EvidenciaAdjunta
+Metadatos de fotografías, órdenes de servicio o diagramas técnicos asociados a la solicitud.
+- **Atributos Conceptuales:** Identificador, solicitud asociada, nombre de archivo original, identificador único de almacenamiento desacoplado (UUID v4), tipo de contenido MIME real verificado, extensión validada, tamaño en bytes (máximo $5.242.880\text{ bytes}$ / 5 MB), hash SHA-256 de integridad, URI del almacenamiento desacoplado, usuario que subió el archivo, estampa temporal.
+- **Reglas Conceptuales:**
+  - Cero BLOBs en tablas transaccionales (Restricción Técnica 5, D-04).
+  - Máximo 5 archivos por solicitud.
+
+#### Entidad: TransaccionIdempotencia
+Control de deduplicación de peticiones originadas por fallas de red Wi-Fi hospitalaria (RN-011, D-03).
+- **Atributos Conceptuales:** Clave única de idempotencia (UUID enviado por el cliente), usuario autor, tipo de recurso afectado, hash SHA-256 del contenido de la petición, código de respuesta HTTP retornado, cuerpo de respuesta serializado, estampa de creación, estampa de expiración (TTL de 24 horas).
+
+#### Entidad: EventoOutbox
+Desacoplamiento asíncrono de eventos de negocio y notificaciones (D-06).
+- **Atributos Conceptuales:** Identificador, tipo de evento (`ALERTA_SLA_75`, `ESCALAMIENTO_SLA_100`, `DESPACHO_EMAIL_SMTP`, `AUTO_CIERRE_48H`), entidad agregada asociada, carga útil del evento (payload estructurado), estado de procesamiento (pendiente, procesado, fallido), cantidad de reintentos, estampa de creación, estampa programada de ejecución.
+
+#### Entidad: AuditoriaEvento (Append-Only)
+Pista legal de auditoría global del sistema para cumplimiento de normas de salud y acreditación hospitalaria por 5 años (RF-072, RN-013).
+- **Atributos Conceptuales:** Identificador de evento, usuario autor, dirección IP corporativa, acción ejecutada, entidad afectada, identificador de la entidad, valores previos, valores posteriores, hash encadenado de no repudio, estampa temporal del servidor en UTC.
+
+---
+
+## 3. Matriz de Relaciones y Cardinalidades Conceptuales
+
+| Entidad Origen | Cardinalidad | Entidad Destino | Descripción de la Relación |
+| :--- | :---: | :--- | :--- |
+| **SedeHospitalaria** | $1 : N$ | **ServicioHospitalario** | Una sede alberga múltiples servicios clínicos y técnicos. |
+| **SedeHospitalaria** | $1 : N$ | **Usuario** | Una sede cuenta con múltiples usuarios adscritos. |
+| **ServicioHospitalario** | $1 : N$ | **CuadrillaGuardia** | Un servicio resolutor coordina múltiples cuadrillas de turno. |
+| **CuadrillaGuardia** | $N : M$ | **Usuario** | Mediante *CuadrillaMiembro*: un técnico participa en cuadrillas de guardia. |
+| **ServicioHospitalario** | $1 : N$ | **CatalogoSolicitudTipo** | Un servicio resolutor tipifica sus solicitudes y fallas técnicas. |
+| **CatalogoSolicitudTipo** | $1 : N$ | **PoliticaSLA** | Un tipo de solicitud posee políticas de tiempo por nivel de prioridad. |
+| **SedeHospitalaria** | $1 : N$ | **Solicitud** | Una sede genera y centraliza solicitudes correlativas. |
+| **ServicioHospitalario** | $1 : N$ | **Solicitud** (Solicitante) | Un servicio asistencial origina solicitudes de soporte. |
+| **ServicioHospitalario** | $1 : N$ | **Solicitud** (Resolutor) | Un servicio técnico resuelve solicitudes de su competencia. |
+| **Usuario** | $1 : N$ | **Solicitud** (Solicitante) | Un usuario radica requerimientos. |
+| **Usuario** | $0..1 : N$ | **Solicitud** (Asignado) | Un técnico resolutor individual tiene solicitudes a su cargo. |
+| **CuadrillaGuardia** | $0..1 : N$ | **Solicitud** (Asignada) | Una cuadrilla de turno asume solicitudes de guardia. |
+| **Solicitud** | $1 : 1$ | **ControlTiempoSLA** | Cada solicitud posee exactamente un monitor temporal de SLA. |
+| **Solicitud** | $1 : N$ | **HistorialEstadoSolicitud** | Una solicitud registra una o más transiciones inmutables. |
+| **Solicitud** | $1 : 0..1$ | **InformeAtencionTecnica** | Una solicitud atendida posee exactamente un informe técnico. |
+| **Solicitud** | $1 : 0..N$ | **ReaperturaSolicitud** | Una solicitud puede registrar reaperturas controladas ($\le 48\text{ h}$). |
+| **Solicitud** | $1 : 0..5$ | **EvidenciaAdjunta** | Una solicitud puede contener hasta 5 archivos adjuntos técnicos. |
+| **Solicitud** | $1 : N$ | **BitacoraNotaTecnica** | Una solicitud acumula notas técnicas y eventos de guardia. |
+| **Solicitud** | $1 : N$ | **ReasignacionSolicitud** | Una solicitud audita cambios entre técnicos responsables. |
+
+---
+
+## 4. Reglas de Negocio Conceptuales Inviolables
+
+1. **Inmutabilidad y Unicidad del Correlativo (RN-001):**
+   - El código `H{sede}-{año}-{secuencial}` se genera de forma atómica e irreversible al momento de radicar y nunca cambia ni se reutiliza.
+2. **Datos Mínimos Obligatorios (RN-002):**
+   - Ninguna solicitud existe sin sede, servicio solicitante, servicio resolutor, ubicación física específica, prioridad asistencial y usuario autor.
+3. **Máquina de Estados Finita Determinista (RN-005):**
+   - Transiciones legales unidireccionales:
+     - `Registrada` $\rightarrow$ `Asignada`, `Rechazada`, `Cancelada`.
+     - `Asignada` $\rightarrow$ `En Proceso`, `Reasignada`, `Cancelada`.
+     - `En Proceso` $\rightarrow$ `En Espera`, `Atendida`, `Reasignada`.
+     - `En Espera` $\rightarrow$ `En Proceso`.
+     - `Atendida` $\rightarrow$ `Cerrada`, `Reaperturada`.
+     - `Reaperturada` $\rightarrow$ `En Proceso`.
+     - `Cerrada` y `Rechazada` $\rightarrow$ Terminales inmutables definitivos.
+4. **Pausa y Reanudación de SLA (RN-006):**
+   - La transición a 'En Espera' suspende el reloj de SLA, exigiendo causal y fecha tentativa; al reanudar, se ajusta la fecha de vencimiento postergándola por el tiempo exacto pausado.
+5. **Precondición Ineludible de Informe Técnico (RN-007):**
+   - No se permite transicionar a `Atendida` sin el registro completo del informe de atención (horas dedicadas, repuestos y condición operativa final).
+6. **Causal Obligatoria de Cancelación o Rechazo (RN-009):**
+   - Exige causal catalogada y justificación textual $\ge 20$ caracteres.
+7. **Ventana Rígida de Reapertura (RN-010):**
+   - Bloqueada terminantemente tras 48 horas continuas de notificada la atención.
+8. **Prohibición de Borrado Físico (RN-012, RN-013):**
+   - Ninguna entidad del modelo conceptual admite eliminación física; solo bajas lógicas y estados terminales auditados por 5 años.
+9. **Zero-PHI (RNF-035):**
+   - Ninguna entidad contiene atributos destinados a expedientes clínicos, nombres de pacientes o datos protegidos de salud.
+
+---
+
+## 5. Conclusión y Traspaso de Etapa
+
+El modelo conceptual del **Sistema S3IH** formaliza el 100% de los conceptos del dominio hospitalario, sus cardinalidades, reglas de negocio y garantías de integridad sin dependencias prematuras de sintaxis SQL.
+
+El siguiente paso obligatorio corresponde a:
+> **Paso 03 — Diagrama E-R (`02_modelo_conceptual/diagrama_er.md`):**  
+> Representar el modelo conceptual en un diagrama visual Entidad-Relación versionable utilizando **Mermaid** y formalizando entidades, relaciones y cardinalidades bajo el skill `database-schema-designer`.

@@ -20,6 +20,8 @@ function loadEnv(string $path): void
         // no pisa variables ya definidas en el entorno (pruebas con override)
         if ($key !== '' && getenv($key) === false) {
             putenv("{$key}={$value}");
+            $_ENV[$key] = $value;
+            $_SERVER[$key] = $value;
         }
     }
 }
@@ -33,6 +35,12 @@ function envRequired(string $key): string
         throw new RuntimeException("Falta variable requerida: {$key}");
     }
     return $value;
+}
+
+function env(string $key, mixed $default = null): mixed
+{
+    $val = getenv($key);
+    return ($val !== false && $val !== '') ? $val : $default;
 }
 
 // autoloader PSR-4 mínimo: App\ -> app/

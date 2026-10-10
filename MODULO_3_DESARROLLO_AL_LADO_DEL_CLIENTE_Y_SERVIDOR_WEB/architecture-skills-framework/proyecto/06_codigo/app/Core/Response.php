@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
+use PDOException;
 use RuntimeException;
 use Throwable;
 
@@ -11,7 +12,8 @@ final class Response
     public static function json(int $status, array $body): never
     {
         http_response_code($status);
-        echo json_encode($body, JSON_UNESCAPED_UNICODE);
+        header('Content-Type: application/json; charset=UTF-8');
+        echo json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
 
@@ -21,20 +23,23 @@ final class Response
     }
 
     /**
-     * CP-BACK-01: patrón reutilizable. Ejecuta la acción del controller y
-     * traduce excepciones a respuestas HTTP (RuntimeException → 400/404,
-     * Throwable → 500 sin stack trace). Lo usan Auth/Categoria/Producto.
+     * Patrón reutilizable para controllers de la API REST.
+     * Captura PDOException primero para no filtrar detalles internos de BD,
+     * traduce RuntimeException a 400/404 y cualquier otra Throwable a 500 sanitizado.
      */
     public static function execute(callable $action, int $status): never
     {
         try {
             $data = $action();
+        } catch (PDOException $e) {
+            error_log("DB Error: " . $e->getMessage());
+            self::fail(500, 'Error de base de datos');
         } catch (RuntimeException $e) {
             $code = (int) $e->getCode();
             self::fail($code >= 400 ? $code : 400, $e->getMessage());
         } catch (Throwable $e) {
-            error_log($e->getMessage());
-            self::fail(500, 'Error de base de datos');
+            error_log("Internal Error: " . $e->getMessage());
+            self::fail(500, 'Error interno del servidor');
         }
         self::json($status, ['success' => true, 'data' => $data]);
     }

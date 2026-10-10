@@ -1,20 +1,21 @@
 {
-    "workflow":  "03_api_pilot_workflow",
-    "phase":  "api_pilot",
-    "scope":  [
-                  "cat_categoria"
-              ],
-    "current_checkpoint":  "COMPLETED",
-    "last_completed_checkpoint":  "CP-API-07",
-    "technical_status":  "PASSED",
-    "human_status":  "APPROVED",
-    "blocked":  false,
-    "can_continue":  true,
-    "next":  "Esperar aprobación. CP-API-08: OpenAPI + suite CRUD completa (tests/). No iniciar backend.",
-    "skills_allowed":  [
-                           "php-development",
-                           "api-design-principles",
-                           "openapi-spec-generation"
-                       ],
-    "last_completed":  "CP-API-08"
+    "workflow": "03_api_pilot_workflow",
+    "phase": "api_pilot",
+    "scope": [
+        "cat_categoria"
+    ],
+    "current_checkpoint": "CP-API-08",
+    "last_completed_checkpoint": "CP-API-08",
+    "technical_status": "PASSED",
+    "human_status": "APPROVED",
+    "workflow_status": "COMPLETED",
+    "blocked": false,
+    "can_continue": true,
+    "next": "Workflow 03 concluido y aprobado formalmente.",
+    "skills_allowed": [
+        "php-development",
+        "api-design-principles",
+        "openapi-spec-generation"
+    ],
+    "last_completed": "CP-API-08"
 }

@@ -1,0 +1,14 @@
+# Environment files
+.env
+!.env.example
+
+# Temporary office files
+~$*
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary logs
+*.log

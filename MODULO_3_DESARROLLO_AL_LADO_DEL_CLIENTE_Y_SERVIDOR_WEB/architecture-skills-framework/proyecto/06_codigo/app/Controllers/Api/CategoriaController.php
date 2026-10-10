@@ -5,7 +5,6 @@ namespace App\Controllers\Api;
 
 use App\Core\Request;
 use App\Core\Response;
-use App\Services\AuthService;
 use App\Services\CategoriaService;
 use App\Validators\CategoriaValidator;
 
@@ -20,7 +19,6 @@ final class CategoriaController
     public function index(Request $request): never
     {
         Response::execute(function (): array {
-            AuthService::requireSession();
             return $this->service->list();
         }, 200);
     }
@@ -28,7 +26,6 @@ final class CategoriaController
     public function show(Request $request): never
     {
         Response::execute(function () use ($request): array {
-            AuthService::requireSession();
             $id = $this->validator->validateId($request->param('id'));
             return $this->service->get($id);
         }, 200);
@@ -37,7 +34,6 @@ final class CategoriaController
     public function store(Request $request): never
     {
         Response::execute(function () use ($request): array {
-            AuthService::requireSession();
             $data = $this->validator->validateBody($request->body());
             return $this->service->create($data);
         }, 201);
@@ -46,7 +42,6 @@ final class CategoriaController
     public function update(Request $request): never
     {
         Response::execute(function () use ($request): array {
-            AuthService::requireSession();
             $id = $this->validator->validateId($request->param('id'));
             $data = $this->validator->validateBody($request->body());
             return $this->service->update($id, $data);
@@ -57,7 +52,6 @@ final class CategoriaController
     public function destroy(Request $request): never
     {
         Response::execute(function () use ($request): array {
-            AuthService::requireSession();
             $id = $this->validator->validateId($request->param('id'));
             return $this->service->deactivate($id);
         }, 200);

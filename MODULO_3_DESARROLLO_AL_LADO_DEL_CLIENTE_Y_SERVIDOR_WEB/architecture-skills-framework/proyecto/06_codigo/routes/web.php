@@ -24,4 +24,9 @@ return [
     ['GET', '/dashboard', [DashboardController::class, 'index']],
     ['GET', '/categorias', [CategoriasController::class, 'index']],
     ['GET', '/productos', [ProductoController::class, 'index']],
+
+    // Workflow 08 (CP-SOL-05..06): Interfaz Web Asistencial: Bandeja, Radicación y Detalle FSM
+    ['GET', '/solicitudes', [\App\Controllers\Web\SolicitudesController::class, 'index']],
+    ['GET', '/solicitudes/radicar', [\App\Controllers\Web\SolicitudesController::class, 'radicar']],
+    ['GET', '/solicitudes/{id}', [\App\Controllers\Web\SolicitudesController::class, 'show']],
 ];

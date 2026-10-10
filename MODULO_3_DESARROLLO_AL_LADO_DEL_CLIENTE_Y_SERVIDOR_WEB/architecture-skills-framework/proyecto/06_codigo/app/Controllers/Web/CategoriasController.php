@@ -18,7 +18,10 @@ final class CategoriasController
             exit;
         }
         header('Content-Type: text/html; charset=utf-8');
-        View::render('categorias/index', ['pageTitle' => 'Categorías'], 'layouts/main');
+        View::render('categorias/index', [
+            'pageTitle' => 'Categorías de Suministros | S3IH',
+            'userName' => (string) ($_SESSION['nombre'] ?? 'Personal S3IH'),
+        ], 'layouts/main');
     }
 
     private function hasSession(): bool
