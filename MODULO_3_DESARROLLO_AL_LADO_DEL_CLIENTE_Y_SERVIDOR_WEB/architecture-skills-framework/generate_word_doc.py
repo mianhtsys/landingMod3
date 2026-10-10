@@ -483,7 +483,7 @@ def build_word_document(output_path):
 
     add_header_styled(doc, "5.4. Enlace al Repositorio y Ejecución del Proyecto", level=2)
     add_callout(doc, "Repositorio GitHub del Proyecto:\n"
-                     "https://github.com/darkpro/MAESTRIA_EN_INGENIERIA_DE_SOFTWARE_Y_SISTEMAS_INFORMATICO\n\n"
+                     "https://github.com/mianhtsys/landingMod3.git\n\n"
                      "Ruta del Código de la Landing Page: proyecto/07_landing/\n"
                      "Comando de Ejecución Local: php -S 127.0.0.1:8110 -t proyecto/07_landing/public",
                      title="REPOSITORIO DE CÓDIGO FUENTE")
