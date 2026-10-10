@@ -4,6 +4,7 @@
 
 # Temporary office files
 ~$*
+*.docx
 
 # OS files
 Thumbs.db
@@ -12,3 +13,6 @@ Desktop.ini
 
 # Temporary logs
 *.log
+
+# Scripts de generación de documentos locales
+generate_word_doc.py
